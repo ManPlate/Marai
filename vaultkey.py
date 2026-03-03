@@ -6,11 +6,12 @@ Requires: pip install cryptography pyperclip
 
 import tkinter as tk
 from tkinter import messagebox
-import json, os, base64, secrets, string, threading, urllib.request, webbrowser
+import json, os, base64, secrets, string, threading, urllib.request, webbrowser, subprocess, ctypes, sys, subprocess, ctypes, sys
 
 # ── Version ────────────────────────────────────────────────────────────────
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 CHANGELOG = [
+    ("1.7.0", "Passwords never enter Windows clipboard history (Win+V)"),
     ("1.6.0", "Added automatic update checker"),
     ("1.5.0", "Security hardening: lockout, auto-lock, clipboard clear"),
     ("1.4.0", "Added password generator with strength meter"),
@@ -606,9 +607,7 @@ class VaultApp(tk.Frame):
         self._build_ui()
         self._render()
         self._auto_lock_job   = None
-        self._clipboard_job   = None
         self._AUTO_LOCK_SECS  = 300   # 5 minutes
-        self._CLIPBOARD_SECS  = 30    # 30 seconds
         self._reset_auto_lock()
         # Bind mouse/keyboard activity to reset the auto-lock timer
         self.winfo_toplevel().bind_all("<Motion>",   lambda e: self._reset_auto_lock())
@@ -815,13 +814,7 @@ class VaultApp(tk.Frame):
                   ).pack(side="right", padx=2)
 
     def _copy(self, value, row):
-        if CLIPBOARD_OK:
-            pyperclip.copy(value)
-        else:
-            self.winfo_toplevel().clipboard_clear()
-            self.winfo_toplevel().clipboard_append(value)
-        # Auto-clear clipboard after 30 seconds
-        self._schedule_clipboard_clear()
+        self._copy_secure(value)
         orig = SURFACE2
         widgets = [row] + list(row.winfo_children())
         for w in widgets:
@@ -829,6 +822,49 @@ class VaultApp(tk.Frame):
             except: pass
         self.after(500, lambda: [w.config(bg=orig)
                                  for w in widgets if w.winfo_exists()])
+
+    def _copy_secure(self, value):
+        """
+        Copy to clipboard bypassing Windows clipboard history (Win+V).
+        Uses ExcludeClipboardContentFromMonitorProcessing flag via ctypes.
+        Falls back to normal copy on non-Windows or if API call fails.
+        """
+        copied = False
+        if sys.platform == "win32":
+            try:
+                u32      = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
+
+                # Register the special format that tells Windows to skip history
+                CF_EXCLUDE     = u32.RegisterClipboardFormatW(
+                    "ExcludeClipboardContentFromMonitorProcessing")
+                CF_UNICODETEXT = 13
+                GMEM_MOVEABLE  = 0x0002
+
+                # Encode text as null-terminated UTF-16-LE
+                encoded  = (value + "\0").encode("utf-16-le")
+                h_mem    = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+                if h_mem:
+                    p_mem = kernel32.GlobalLock(h_mem)
+                    if p_mem:
+                        ctypes.memmove(p_mem, encoded, len(encoded))
+                        kernel32.GlobalUnlock(h_mem)
+                        if u32.OpenClipboard(0):
+                            u32.EmptyClipboard()
+                            u32.SetClipboardData(CF_UNICODETEXT, h_mem)
+                            u32.SetClipboardData(CF_EXCLUDE, None)
+                            u32.CloseClipboard()
+                            copied = True
+            except Exception:
+                pass
+
+        if not copied:
+            # Fallback for non-Windows or if ctypes call failed
+            if CLIPBOARD_OK:
+                pyperclip.copy(value)
+            else:
+                self.winfo_toplevel().clipboard_clear()
+                self.winfo_toplevel().clipboard_append(value)
 
     def _on_update_found(self, new_version):
         """Called from background thread — use after() to safely update UI."""
@@ -868,21 +904,6 @@ class VaultApp(tk.Frame):
         self.key   = None
         self.on_lock()
 
-    def _schedule_clipboard_clear(self):
-        if self._clipboard_job:
-            self.after_cancel(self._clipboard_job)
-        self._clipboard_job = self.after(
-            self._CLIPBOARD_SECS * 1000,
-            self._clear_clipboard)
-
-    def _clear_clipboard(self):
-        try:
-            if CLIPBOARD_OK:
-                pyperclip.copy("")
-            else:
-                self.winfo_toplevel().clipboard_clear()
-        except Exception:
-            pass
 
     def _open_generator(self):
         GeneratorDialog(self.winfo_toplevel())

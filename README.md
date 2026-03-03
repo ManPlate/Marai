@@ -37,7 +37,8 @@ No installation needed. Just download and double-click.
 <!-- VERSION_TABLE_START -->
 | Version | What's New |
 |---|---|
-| **v1.6.0** ← current | Added automatic update checker |
+| **v1.7.0** ← current | Passwords never enter Windows clipboard history (Win+V) |
+| **v1.6.0** | Added automatic update checker |
 | **v1.5.0** | Security hardening: lockout, auto-lock, clipboard clear |
 | **v1.4.0** | Added password generator with strength meter |
 | **v1.3.0** | Added ability to change master password |
