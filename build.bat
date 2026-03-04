@@ -1,8 +1,8 @@
 @echo off
-title VaultKey Build Tool
+title Marai Build Tool
 echo.
 echo ============================================
-echo   VaultKey Build Tool
+echo   Marai Build Tool
 echo ============================================
 echo.
 
@@ -22,7 +22,7 @@ if errorlevel 1 (
 )
 
 :: ── Step 3: Write version.json ─────────────────────────────────────────────
-echo [1/4] Reading version from vaultkey.py...
+echo [1/4] Reading version from marai.py...
 py write_version.py
 if errorlevel 1 (
     echo [ERROR] Failed to write version.json
@@ -34,17 +34,17 @@ if errorlevel 1 (
 echo [2/4] Cleaning old build files...
 if exist build          rmdir /s /q build
 if exist dist           rmdir /s /q dist
-if exist VaultKey.spec  del /q VaultKey.spec
+if exist Marai.spec  del /q Marai.spec
 echo [OK] Cleaned.
 
 :: ── Step 5: Build the exe ──────────────────────────────────────────────────
-echo [3/4] Building VaultKey.exe...
+echo [3/4] Building Marai.exe...
 echo.
 
 if exist vaultkey.ico (
-    py -m PyInstaller --onefile --windowed --name VaultKey --icon=vaultkey.ico vaultkey.py
+    py -m PyInstaller --onefile --windowed --name Marai --icon=vaultkey.ico marai.py
 ) else (
-    py -m PyInstaller --onefile --windowed --name VaultKey vaultkey.py
+    py -m PyInstaller --onefile --windowed --name Marai marai.py
 )
 
 if errorlevel 1 (
@@ -58,13 +58,13 @@ if errorlevel 1 (
 echo.
 echo [4/4] Done!
 echo ============================================
-echo   VaultKey.exe is ready in the dist folder
+echo   Marai.exe is ready in the dist folder
 echo ============================================
 echo.
 echo   Next steps:
-echo   1. Test dist\VaultKey.exe
-echo   2. Upload vaultkey.py to GitHub
+echo   1. Test dist\Marai.exe
+echo   2. Upload marai.py to GitHub
 echo   3. Upload version.json to GitHub
-echo   4. Share dist\VaultKey.exe with your users
+echo   4. Share dist\Marai.exe with your users
 echo.
 pause

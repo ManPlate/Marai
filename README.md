@@ -1,7 +1,8 @@
-# 🔐 VaultKey — Offline Password Manager
+# 🔐 Marai — Offline Password Manager
 
-> A simple, secure, offline desktop password manager for Windows.
-> No internet. No accounts. No subscriptions. Your passwords stay on your machine.
+> *Marai* (மறை) — an ancient Tamil word meaning "that which is hidden". In Sangam literature, Marai referred to sacred knowledge concealed from the world, accessible only to those who hold the key.
+>
+> Your passwords deserve the same protection.
 
 ---
 
@@ -13,7 +14,7 @@
 - 🗂️ **Categories** — organise entries as Work, Email, Social, Finance, Dev or Other
 - 🔍 **Search** — find any entry instantly
 - 🔒 **Auto-lock** — vault locks automatically after 5 minutes of inactivity
-- 📋 **Clipboard auto-clear** — copied passwords are wiped from clipboard after 30 seconds
+- 📋 **Clipboard protection** — copied passwords never appear in Windows clipboard history (Win+V)
 - 🛡️ **Login lockout** — 5 failed attempts triggers a 30-second cooldown
 - 🔑 **Change master password** — re-encrypts the entire vault with the new password
 - 🔔 **Auto update checker** — notifies you when a new version is available
@@ -23,7 +24,7 @@
 
 ## 🚀 Download
 
-👉 **[Download the latest VaultKey.exe from Releases](https://github.com/ManPlate/VaultKey/releases)**
+👉 **[Download the latest Marai.exe from Releases](https://github.com/ManPlate/Marai/releases)**
 
 No installation needed. Just download and double-click.
 
@@ -37,7 +38,8 @@ No installation needed. Just download and double-click.
 <!-- VERSION_TABLE_START -->
 | Version | What's New |
 |---|---|
-| **v1.7.0** ← current | Passwords never enter Windows clipboard history (Win+V) |
+| **v2.0.0** ← current | Rebranded from VaultKey to Marai |
+| **v1.7.0** | Passwords never enter Windows clipboard history (Win+V) |
 | **v1.6.0** | Added automatic update checker |
 | **v1.5.0** | Security hardening: lockout, auto-lock, clipboard clear |
 | **v1.4.0** | Added password generator with strength meter |
@@ -55,14 +57,16 @@ No installation needed. Just download and double-click.
 - Master password never stored — used only to derive the encryption key
 - Key derivation uses **PBKDF2-HMAC-SHA256** with 390,000 iterations
 - Random 16-byte salt generated per vault
-- Encrypted vault stored locally at `C:\Users\YourName\.vaultkey\`
+- Copied passwords never saved to Windows clipboard history
+- Auto-locks after 5 minutes of inactivity
+- Encrypted vault stored locally at `C:\Users\YourName\.marai\`
 
 ---
 
 ## 🖥️ How to Update
 
-1. Download the new `VaultKey.exe` from [Releases](https://github.com/ManPlate/VaultKey/releases)
-2. Replace the old `VaultKey.exe` with the new one
+1. Download the new `Marai.exe` from [Releases](https://github.com/ManPlate/Marai/releases)
+2. Replace the old `Marai.exe` with the new one
 3. Your passwords are safe — they are stored separately from the app
 
 See [HOW_TO_UPDATE.md](HOW_TO_UPDATE.md) for full instructions.
