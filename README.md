@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🔐 Marai
+<img src="https://raw.githubusercontent.com/ManPlate/Marai/main/marai_logo.svg" alt="Marai Logo" width="120" height="120"/>
+
+# Marai
 
 ### Offline Password Manager for Windows
 

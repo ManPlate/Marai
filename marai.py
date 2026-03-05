@@ -5,7 +5,7 @@ Requires: pip install cryptography pyperclip
 """
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import json, os, base64, secrets, string, threading, urllib.request, webbrowser, subprocess, ctypes, sys
 
 # ── Version ────────────────────────────────────────────────────────────────
@@ -378,9 +378,13 @@ class LockScreen(tk.Frame):
                 kdf="argon2id"
             )
             # Update the in-memory key so auto-save uses new key
-            vault_frame = self.master.nametowidget(self.master.winfo_children()[-1].winfo_name())
-            if hasattr(vault_frame, "key"):
-                vault_frame.key = new_key
+            # Find the VaultApp frame inside app.content
+            app = self.winfo_toplevel()
+            content = getattr(app, "content", app)
+            for child in content.winfo_children():
+                if hasattr(child, "key"):
+                    child.key = new_key
+                    break
         except Exception:
             pass   # If anything fails, vault remains on PBKDF2 — no data loss
 
@@ -443,6 +447,75 @@ class LockScreen(tk.Frame):
         self.on_unlock(key)
 
 
+# ── Dialog Title Bar helper ───────────────────────────────────────────────
+def make_dialog(win, title, w, h):
+    """
+    Applies a consistent custom title bar to any Toplevel dialog.
+    Replaces the native OS title bar with a styled dark bar.
+    """
+    win.overrideredirect(True)
+    win.configure(bg=SURFACE)
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+    win.grab_set()
+
+    # Title bar frame
+    bar = tk.Frame(win, bg=TITLEBAR_BG, height=TITLEBAR_H)
+    bar.pack(fill="x", side="top")
+    bar.pack_propagate(False)
+
+    # Title label
+    lbl = tk.Label(bar, text=title, font=("Segoe UI", 10, "bold"),
+                   fg=TEXT, bg=TITLEBAR_BG, anchor="w")
+    lbl.pack(side="left", padx=12, fill="y")
+
+    # Close button
+    def _close():
+        win.grab_release()
+        win.destroy()
+
+    close_btn = tk.Label(bar, text="✕", width=4,
+                         font=("Segoe UI", 10), fg="#aaaacc",
+                         bg=TITLEBAR_BG, cursor="hand2")
+    close_btn.pack(side="right")
+    close_btn.bind("<Enter>",    lambda e: close_btn.config(bg=BTN_CLOSE_HOV, fg="white"))
+    close_btn.bind("<Leave>",    lambda e: close_btn.config(bg=TITLEBAR_BG,   fg="#aaaacc"))
+    close_btn.bind("<Button-1>", lambda e: _close())
+
+    # Drag support
+    drag = {"x": 0, "y": 0}
+    def _start(e):
+        drag["x"] = e.x_root - win.winfo_x()
+        drag["y"] = e.y_root - win.winfo_y()
+    def _drag(e):
+        win.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
+    for w_ in (bar, lbl):
+        w_.bind("<ButtonPress-1>", _start)
+        w_.bind("<B1-Motion>",     _drag)
+
+    # Thin separator
+    tk.Frame(win, bg=BORDER, height=1).pack(fill="x")
+
+    return _close   # caller can use this as the destroy function
+
+
+# ── Styled scrollbar ──────────────────────────────────────────────────────
+def mk_scrollbar(parent, **kw):
+    """A ttk scrollbar styled to match the dark theme."""
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure("Dark.Vertical.TScrollbar",
+                    background=SURFACE2,
+                    troughcolor=SURFACE,
+                    bordercolor=SURFACE,
+                    arrowcolor=MUTED,
+                    darkcolor=SURFACE2,
+                    lightcolor=SURFACE2)
+    style.map("Dark.Vertical.TScrollbar",
+              background=[("active", ACCENT)])
+    return ttk.Scrollbar(parent, style="Dark.Vertical.TScrollbar", **kw)
+
+
 # ── Password Generator Helper ─────────────────────────────────────────────
 def generate_password(length=16, upper=True, lower=True,
                       digits=True, symbols=True):
@@ -488,13 +561,7 @@ class GeneratorDialog(tk.Toplevel):
     def __init__(self, master, on_use=None):
         super().__init__(master)
         self.on_use = on_use   # callback(password) when Use button clicked
-        self.title("Password Generator")
-        self.configure(bg=SURFACE)
-        self.resizable(False, False)
-        self.grab_set()
-        w, h = 500, 480
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        self._destroy = make_dialog(self, "⚙️  Password Generator", 500, 480)
         self._build()
         self._generate()
 
@@ -637,13 +704,8 @@ class EntryDialog(tk.Toplevel):
         super().__init__(master)
         self.on_save = on_save
         self.entry   = entry
-        self.configure(bg=SURFACE)
-        self.title("Edit Entry" if entry else "New Entry")
-        self.resizable(False, False)
-        self.grab_set()
-        w, h = 460, 540
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        _title = "✏️  Edit Entry" if entry else "🗝️  New Entry"
+        self._destroy = make_dialog(self, _title, 460, 540)
         self._build()
 
     def _lbl(self, parent, text):
@@ -853,7 +915,7 @@ class VaultApp(tk.Frame):
         outer = tk.Frame(self, bg=BG)
         outer.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
-        sb = tk.Scrollbar(outer, orient="vertical", command=self.canvas.yview)
+        sb = mk_scrollbar(outer, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -1074,13 +1136,7 @@ class VaultApp(tk.Frame):
 
     def _change_password(self):
         win = tk.Toplevel(self.winfo_toplevel())
-        win.title("Change Master Password")
-        win.configure(bg=SURFACE)
-        win.resizable(False, False)
-        win.grab_set()
-        w, h = 420, 460
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        make_dialog(win, "🔑  Change Master Password", 420, 460)
 
         pad = tk.Frame(win, bg=SURFACE, padx=30, pady=28)
         pad.pack(fill="both", expand=True)
@@ -1187,13 +1243,7 @@ class VaultApp(tk.Frame):
 
     def _show_about(self):
         win = tk.Toplevel(self.winfo_toplevel())
-        win.title("About Marai")
-        win.configure(bg=SURFACE)
-        win.resizable(False, False)
-        win.grab_set()
-        w, h = 520, 480
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        make_dialog(win, "🔐  About Marai", 520, 600)
 
         # ── Header (fixed, always visible) ───────────────────────────────
         hdr = tk.Frame(win, bg=SURFACE, padx=30, pady=20)
@@ -1232,8 +1282,8 @@ class VaultApp(tk.Frame):
         scroll_frame.pack_propagate(False)
 
         canvas = tk.Canvas(scroll_frame, bg=SURFACE, highlightthickness=0)
-        scrollbar = tk.Scrollbar(scroll_frame, orient="vertical",
-                                 command=canvas.yview)
+        scrollbar = mk_scrollbar(scroll_frame, orient="vertical",
+                                  command=canvas.yview)
         inner = tk.Frame(canvas, bg=SURFACE)
 
         inner.bind("<Configure>",
@@ -1274,7 +1324,7 @@ class VaultApp(tk.Frame):
         gh_lbl.bind("<Enter>", lambda e: gh_lbl.config(fg=GREEN))
         gh_lbl.bind("<Leave>", lambda e: gh_lbl.config(fg=ACCENT))
 
-        mk_btn(ftr, "Close", win.destroy, bg=SURFACE2, fg=MUTED, w=10).pack(pady=(14,0))
+        mk_btn(ftr, "Close", lambda: [win.grab_release(), win.destroy()], bg=SURFACE2, fg=MUTED, w=10).pack(pady=(14,0))
 
     def _add_entry(self):
         def on_save(r):
@@ -1297,6 +1347,112 @@ class VaultApp(tk.Frame):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Custom Title Bar
+# ══════════════════════════════════════════════════════════════════════════════
+TITLEBAR_BG     = "#0a0a10"
+TITLEBAR_H      = 36
+BTN_CLOSE_HOV   = "#c0392b"
+BTN_MIN_HOV     = "#444466"
+BTN_MAX_HOV     = "#444466"
+
+class TitleBar(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=TITLEBAR_BG, height=TITLEBAR_H)
+        self.pack(fill="x", side="top")
+        self.pack_propagate(False)
+        self._app   = master
+        self._drag_x = 0
+        self._drag_y = 0
+        self._maximised = False
+        self._normal_geo = None
+        self._build()
+        self.bind("<ButtonPress-1>",   self._start_drag)
+        self.bind("<B1-Motion>",       self._do_drag)
+        self.bind("<Double-Button-1>", self._toggle_max)
+
+    def _build(self):
+        import math
+
+        # ── Left: mini logo + name ────────────────────────────────────────
+        left = tk.Frame(self, bg=TITLEBAR_BG)
+        left.pack(side="left", padx=(10, 0))
+
+        # Tiny concentric canvas icon
+        ic = tk.Canvas(left, width=20, height=20,
+                       bg=TITLEBAR_BG, highlightthickness=0)
+        ic.pack(side="left", padx=(0, 6))
+        cx, cy = 10.0, 10.0
+        def rpts(rx, ry, n, rot):
+            pts = []
+            for i in range(n):
+                a = math.radians(rot + i * 360 / n)
+                pts.extend([cx + rx*math.cos(a), cy + ry*math.sin(a)])
+            return pts
+        ic.create_polygon(rpts(8,7.5,7,12),  fill="", outline="#3d2d8a", width=1)
+        ic.create_polygon(rpts(6,5.5,7,5),   fill="", outline=ACCENT,    width=1)
+        ic.create_polygon(rpts(3.5,3.5,7,18),fill="#1e1040", outline="#c4b0ff", width=1)
+        ic.create_oval(cx-2,cy-2,cx+2,cy+2,  fill="#ffffff", outline="")
+        ic.bind("<ButtonPress-1>",   self._start_drag)
+        ic.bind("<B1-Motion>",       self._do_drag)
+        ic.bind("<Double-Button-1>", self._toggle_max)
+
+        name_lbl = tk.Label(left, text="Marai",
+                            font=("Segoe UI", 11, "bold"),
+                            fg=TEXT, bg=TITLEBAR_BG)
+        name_lbl.pack(side="left")
+        name_lbl.bind("<ButtonPress-1>",   self._start_drag)
+        name_lbl.bind("<B1-Motion>",       self._do_drag)
+        name_lbl.bind("<Double-Button-1>", self._toggle_max)
+
+        # ── Right: window controls ────────────────────────────────────────
+        right = tk.Frame(self, bg=TITLEBAR_BG)
+        right.pack(side="right")
+
+        def wbtn(text, cmd, hover):
+            b = tk.Label(right, text=text, width=4, height=1,
+                         font=("Segoe UI", 10), fg="#aaaacc",
+                         bg=TITLEBAR_BG, cursor="hand2")
+            b.pack(side="left")
+            b.bind("<Enter>",    lambda e, w=b, h=hover: w.config(bg=h, fg="white"))
+            b.bind("<Leave>",    lambda e, w=b: w.config(bg=TITLEBAR_BG, fg="#aaaacc"))
+            b.bind("<Button-1>", lambda e: cmd())
+            return b
+
+        wbtn("─", self._minimise,   BTN_MIN_HOV)
+        wbtn("□", self._toggle_max, BTN_MAX_HOV)
+        wbtn("✕", self._close,      BTN_CLOSE_HOV)
+
+    # ── Drag ──────────────────────────────────────────────────────────────
+    def _start_drag(self, e):
+        self._drag_x = e.x_root - self._app.winfo_x()
+        self._drag_y = e.y_root - self._app.winfo_y()
+
+    def _do_drag(self, e):
+        if not self._maximised:
+            x = e.x_root - self._drag_x
+            y = e.y_root - self._drag_y
+            self._app.geometry(f"+{x}+{y}")
+
+    # ── Controls ──────────────────────────────────────────────────────────
+    def _minimise(self):
+        self._app.iconify()
+
+    def _toggle_max(self, e=None):
+        if self._maximised:
+            self._app.geometry(self._normal_geo)
+            self._maximised = False
+        else:
+            self._normal_geo = self._app.geometry()
+            sw = self._app.winfo_screenwidth()
+            sh = self._app.winfo_screenheight()
+            self._app.geometry(f"{sw}x{sh}+0+0")
+            self._maximised = True
+
+    def _close(self):
+        self._app.destroy()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Root Window
 # ══════════════════════════════════════════════════════════════════════════════
 class App(tk.Tk):
@@ -1304,37 +1460,70 @@ class App(tk.Tk):
         super().__init__()
         self.title("Marai")
         self.configure(bg=BG)
+
+        # Remove the OS title bar and draw our own
+        self.overrideredirect(True)
+
         w, h = 920, 660
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
         self.minsize(820, 520)
+
         self._set_icon()
+
+        # Restore taskbar presence — overrideredirect removes it by default
+        self.after(10, self._fix_taskbar)
+
+        # Custom title bar sits at the very top
+        self.titlebar = TitleBar(self)
+
+        # Content area below it
+        self.content = tk.Frame(self, bg=BG)
+        self.content.pack(fill="both", expand=True)
+
         self._show_lock()
 
     def _set_icon(self):
-        """Set the window icon for title bar and taskbar."""
-        # When bundled with PyInstaller, resources are in sys._MEIPASS
-        # When running from source, look in the same folder as the script
         import sys
         base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-        ico = os.path.join(base, "marai.ico")
+        ico  = os.path.join(base, "marai.ico")
         if os.path.exists(ico):
             try:
                 self.iconbitmap(ico)
             except Exception:
                 pass
 
+    def _fix_taskbar(self):
+        """
+        overrideredirect(True) removes the app from the Windows taskbar.
+        This restores it by setting WS_EX_APPWINDOW on the window handle.
+        Only runs on Windows — silently skipped on other platforms.
+        """
+        try:
+            import ctypes
+            GWL_EXSTYLE     = -20
+            WS_EX_APPWINDOW = 0x00040000
+            WS_EX_TOOLWINDOW= 0x00000080
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            self.wm_withdraw()
+            self.wm_deiconify()
+        except Exception:
+            pass
+
     def _clear(self):
-        for w in self.winfo_children():
+        for w in self.content.winfo_children():
             w.destroy()
 
     def _show_lock(self):
         self._clear()
-        LockScreen(self, on_unlock=self._show_vault)
+        LockScreen(self.content, on_unlock=self._show_vault)
 
     def _show_vault(self, key):
         self._clear()
-        VaultApp(self, key=key, on_lock=self._show_lock)
+        VaultApp(self.content, key=key, on_lock=self._show_lock)
 
 
 if __name__ == "__main__":
