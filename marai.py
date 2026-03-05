@@ -9,8 +9,9 @@ from tkinter import messagebox
 import json, os, base64, secrets, string, threading, urllib.request, webbrowser, subprocess, ctypes, sys
 
 # ── Version ────────────────────────────────────────────────────────────────
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 CHANGELOG = [
+    ("2.1.0", "Upgraded to Argon2id key derivation — silent migration on login"),
     ("2.0.0", "Rebranded from VaultKey to Marai"),
     ("1.7.0", "Passwords never enter Windows clipboard history (Win+V)"),
     ("1.6.0", "Added automatic update checker"),
@@ -62,6 +63,12 @@ try:
 except ImportError:
     CRYPTO_OK = False
 
+try:
+    from argon2.low_level import hash_secret_raw, Type
+    ARGON2_OK = True
+except ImportError:
+    ARGON2_OK = False
+
 # ── Paths ──────────────────────────────────────────────────────────────────
 APP_DIR    = os.path.join(os.path.expanduser("~"), ".marai")
 VAULT_FILE = os.path.join(APP_DIR, "vault.enc")
@@ -106,9 +113,35 @@ def patch_verify_token_if_needed(key):
         pass
 
 # ── Crypto ─────────────────────────────────────────────────────────────────
-def derive_key(password, salt):
+# Argon2id parameters (OWASP recommended minimums)
+ARGON2_TIME_COST   = 3       # iterations
+ARGON2_MEMORY_COST = 65536   # 64 MB
+ARGON2_PARALLELISM = 4
+ARGON2_HASH_LEN    = 32
+KDF_VERSION        = "argon2id"
+
+def derive_key_argon2id(password, salt):
+    """Argon2id — memory-hard, GPU-resistant. Current default."""
+    return hash_secret_raw(
+        secret      = password.encode(),
+        salt        = salt,
+        time_cost   = ARGON2_TIME_COST,
+        memory_cost = ARGON2_MEMORY_COST,
+        parallelism = ARGON2_PARALLELISM,
+        hash_len    = ARGON2_HASH_LEN,
+        type        = Type.ID
+    )
+
+def derive_key_pbkdf2(password, salt):
+    """PBKDF2 — legacy, used for migrating old vaults only."""
     kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=390000)
     return kdf.derive(password.encode())
+
+def derive_key(password, salt, kdf=None):
+    """Derive key using the appropriate KDF. Defaults to Argon2id."""
+    if kdf == "pbkdf2" or (not ARGON2_OK):
+        return derive_key_pbkdf2(password, salt)
+    return derive_key_argon2id(password, salt)
 
 def encrypt_data(key, plaintext):
     iv = secrets.token_bytes(12)
@@ -125,9 +158,9 @@ def load_meta():
             return json.load(f)
     return None
 
-def save_meta(salt_b64, verify_b64):
+def save_meta(salt_b64, verify_b64, kdf=KDF_VERSION):
     with open(META_FILE, "w", encoding="utf-8") as f:
-        json.dump({"salt": salt_b64, "verify": verify_b64}, f)
+        json.dump({"salt": salt_b64, "verify": verify_b64, "kdf": kdf}, f)
 
 def vault_exists():
     return os.path.exists(META_FILE) and os.path.exists(VAULT_FILE)
@@ -265,9 +298,10 @@ class LockScreen(tk.Frame):
         meta = load_meta()
         if not meta:
             self.err_lbl.config(text="No vault found."); return
-        salt = base64.b64decode(meta["salt"])
+        salt     = base64.b64decode(meta["salt"])
+        kdf_used = meta.get("kdf", "pbkdf2")   # old vaults have no kdf field
         try:
-            key    = derive_key(pw, salt)
+            key    = derive_key(pw, salt, kdf=kdf_used)
             verify = base64.b64decode(meta["verify"])
             # Accept both old VaultKey token and new Marai token
             decrypted = decrypt_data(key, verify)
@@ -275,6 +309,10 @@ class LockScreen(tk.Frame):
                 raise ValueError
             self._attempts = 0
             patch_verify_token_if_needed(key)
+            # Silent upgrade: if vault still uses PBKDF2, re-derive with
+            # Argon2id and re-encrypt everything in the background
+            if kdf_used == "pbkdf2" and ARGON2_OK:
+                self.after(200, lambda: self._upgrade_kdf(pw, key))
             self.on_unlock(key)
         except Exception:
             self._attempts += 1
@@ -289,6 +327,40 @@ class LockScreen(tk.Frame):
                     text=f"Incorrect password. {remaining} attempt{'s' if remaining != 1 else ''} remaining.",
                     fg=RED)
             self.pw_var.set("")
+
+    def _upgrade_kdf(self, password, old_key):
+        """
+        Silently re-encrypts the vault using Argon2id.
+        Runs once after first login on any PBKDF2 vault.
+        The user never sees this happen.
+        """
+        try:
+            # Load existing vault data with old key
+            with open(VAULT_FILE, "rb") as f:
+                raw = f.read()
+            vault_json = decrypt_data(old_key, raw)
+
+            # Generate new salt and derive Argon2id key
+            new_salt = secrets.token_bytes(16)
+            new_key  = derive_key(password, new_salt, kdf="argon2id")
+
+            # Re-encrypt vault and verification token
+            new_vault_ct  = encrypt_data(new_key, vault_json)
+            new_verify_ct = encrypt_data(new_key, "MARAI_OK")
+
+            with open(VAULT_FILE, "wb") as f:
+                f.write(new_vault_ct)
+            save_meta(
+                base64.b64encode(new_salt).decode(),
+                base64.b64encode(new_verify_ct).decode(),
+                kdf="argon2id"
+            )
+            # Update the in-memory key so auto-save uses new key
+            vault_frame = self.master.nametowidget(self.master.winfo_children()[-1].winfo_name())
+            if hasattr(vault_frame, "key"):
+                vault_frame.key = new_key
+        except Exception:
+            pass   # If anything fails, vault remains on PBKDF2 — no data loss
 
     def _countdown(self, secs):
         if secs > 0:
@@ -338,10 +410,11 @@ class LockScreen(tk.Frame):
         if pw != cf:
             self.err_lbl.config(text="Passwords do not match."); return
         salt      = secrets.token_bytes(16)
-        key       = derive_key(pw, salt)
+        key       = derive_key(pw, salt, kdf="argon2id" if ARGON2_OK else "pbkdf2")
         verify_ct = encrypt_data(key, "MARAI_OK")
         save_meta(base64.b64encode(salt).decode(),
-                  base64.b64encode(verify_ct).decode())
+                  base64.b64encode(verify_ct).decode(),
+                  kdf="argon2id" if ARGON2_OK else "pbkdf2")
         raw = encrypt_data(key, json.dumps([]))
         with open(VAULT_FILE, "wb") as f:
             f.write(raw)
@@ -1033,9 +1106,10 @@ class VaultApp(tk.Frame):
             meta = load_meta()
             salt = base64.b64decode(meta["salt"])
             try:
-                test_key = derive_key(current, salt)
+                kdf_used = meta.get("kdf", "pbkdf2")
+                test_key = derive_key(current, salt, kdf=kdf_used)
                 verify   = base64.b64decode(meta["verify"])
-                if decrypt_data(test_key, verify) != "MARAI_OK":
+                if decrypt_data(test_key, verify) not in ("MARAI_OK", "VAULTKEY_OK"):
                     raise ValueError
             except Exception:
                 err_lbl.config(text="Current password is incorrect.")
@@ -1054,14 +1128,15 @@ class VaultApp(tk.Frame):
                 err_lbl.config(text="New password must be different from current.")
                 return
 
-            # Re-encrypt vault with new key
+            # Re-encrypt vault with new Argon2id key
             new_salt = secrets.token_bytes(16)
-            new_key  = derive_key(new_pw, new_salt)
+            new_key  = derive_key(new_pw, new_salt, kdf="argon2id" if ARGON2_OK else "pbkdf2")
 
-            # Save new meta
+            # Save new meta with kdf field
             new_verify = encrypt_data(new_key, "MARAI_OK")
             save_meta(base64.b64encode(new_salt).decode(),
-                      base64.b64encode(new_verify).decode())
+                      base64.b64encode(new_verify).decode(),
+                      kdf="argon2id" if ARGON2_OK else "pbkdf2")
 
             # Re-encrypt vault data
             raw = encrypt_data(new_key, json.dumps(self.vault))
@@ -1094,39 +1169,73 @@ class VaultApp(tk.Frame):
         win.configure(bg=SURFACE)
         win.resizable(False, False)
         win.grab_set()
-        w, h = 400, 340
+        w, h = 520, 480
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
 
-        pad = tk.Frame(win, bg=SURFACE, padx=30, pady=24)
-        pad.pack(fill="both", expand=True)
-
-        tk.Label(pad, text="🔐", font=("Segoe UI",36), bg=SURFACE).pack()
-        tk.Label(pad, text="M  A  R  A  I", font=("Segoe UI",18,"bold"),
+        # ── Header (fixed, always visible) ───────────────────────────────
+        hdr = tk.Frame(win, bg=SURFACE, padx=30, pady=20)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="🔐", font=("Segoe UI",36), bg=SURFACE).pack()
+        tk.Label(hdr, text="M  A  R  A  I", font=("Segoe UI",18,"bold"),
                  fg=ACCENT, bg=SURFACE).pack()
-        tk.Label(pad, text=f"Version {VERSION}", font=FNT_SM,
-                 fg=MUTED, bg=SURFACE).pack(pady=(2,20))
+        tk.Label(hdr, text=f"Version {VERSION}", font=FNT_SM,
+                 fg=MUTED, bg=SURFACE).pack(pady=(2,0))
 
-        tk.Frame(pad, bg=BORDER, height=1).pack(fill="x", pady=(0,14))
+        tk.Frame(win, bg=BORDER, height=1).pack(fill="x", padx=30, pady=(12,0))
 
-        tk.Label(pad, text="What's New", font=("Segoe UI",10,"bold"),
-                 fg=TEXT, bg=SURFACE).pack(anchor="w")
+        # ── Scrollable changelog ──────────────────────────────────────────
+        tk.Label(win, text="What's New", font=("Segoe UI",10,"bold"),
+                 fg=TEXT, bg=SURFACE).pack(anchor="w", padx=30, pady=(10,4))
+
+        scroll_frame = tk.Frame(win, bg=SURFACE, height=160)
+        scroll_frame.pack(fill="x", padx=30)
+        scroll_frame.pack_propagate(False)
+
+        canvas = tk.Canvas(scroll_frame, bg=SURFACE, highlightthickness=0)
+        scrollbar = tk.Scrollbar(scroll_frame, orient="vertical",
+                                 command=canvas.yview)
+        inner = tk.Frame(canvas, bg=SURFACE)
+
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
         for ver, note in CHANGELOG:
-            row = tk.Frame(pad, bg=SURFACE)
-            row.pack(fill="x", pady=2)
+            row = tk.Frame(inner, bg=SURFACE)
+            row.pack(fill="x", pady=3)
             tag_bg = ACCENT if ver == VERSION else SURFACE2
             tag_fg = "white" if ver == VERSION else MUTED
             tk.Label(row, text=f" v{ver} ", font=("Courier New",9,"bold"),
-                     bg=tag_bg, fg=tag_fg).pack(side="left")
+                     bg=tag_bg, fg=tag_fg, width=8).pack(side="left")
             tk.Label(row, text=note, font=FNT_SM,
                      fg=TEXT if ver == VERSION else MUTED,
-                     bg=SURFACE).pack(side="left", padx=(10,0))
+                     bg=SURFACE, anchor="w", wraplength=340,
+                     justify="left").pack(side="left", padx=(10,0), fill="x")
 
-        tk.Frame(pad, bg=BORDER, height=1).pack(fill="x", pady=14)
-        tk.Label(pad, text="Your data is stored in  ~/.marai/  on your machine.",
+        # ── Footer (fixed, always visible) ───────────────────────────────
+        tk.Frame(win, bg=BORDER, height=1).pack(fill="x", padx=30, pady=(12,0))
+
+        ftr = tk.Frame(win, bg=SURFACE, padx=30, pady=14)
+        ftr.pack(fill="x")
+
+        tk.Label(ftr, text="Your data is stored in  ~/.marai/  on your machine.",
                  font=FNT_SM, fg=MUTED, bg=SURFACE).pack()
-        mk_btn(pad, "Close", win.destroy, bg=SURFACE2, fg=MUTED, w=10).pack(pady=(16,0))
+
+        # Clickable GitHub link
+        gh_url = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}"
+        gh_lbl = tk.Label(ftr, text=gh_url, font=FNT_SM,
+                          fg=ACCENT, bg=SURFACE, cursor="hand2")
+        gh_lbl.pack(pady=(6,0))
+        gh_lbl.bind("<Button-1>", lambda e: webbrowser.open(gh_url))
+        gh_lbl.bind("<Enter>", lambda e: gh_lbl.config(fg=GREEN))
+        gh_lbl.bind("<Leave>", lambda e: gh_lbl.config(fg=ACCENT))
+
+        mk_btn(ftr, "Close", win.destroy, bg=SURFACE2, fg=MUTED, w=10).pack(pady=(14,0))
 
     def _add_entry(self):
         def on_save(r):

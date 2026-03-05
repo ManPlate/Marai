@@ -38,7 +38,8 @@ No installation needed. Just download and double-click.
 <!-- VERSION_TABLE_START -->
 | Version | What's New |
 |---|---|
-| **v2.0.0** ← current | Rebranded from VaultKey to Marai |
+| **v2.1.0** ← current | Upgraded to Argon2id key derivation — silent migration on login |
+| **v2.0.0** | Rebranded from VaultKey to Marai |
 | **v1.7.0** | Passwords never enter Windows clipboard history (Win+V) |
 | **v1.6.0** | Added automatic update checker |
 | **v1.5.0** | Security hardening: lockout, auto-lock, clipboard clear |
