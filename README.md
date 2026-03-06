@@ -127,8 +127,7 @@ Meta:         ~/.marai/meta.json  (salt + verification token — no plaintext)
 <!-- VERSION_TABLE_START -->
 | Version | What's New |
 |---|---|
-| **v2.2.0** ← current | Favourite entries and password age indicator |
-| **v2.1.0** | Upgraded to Argon2id key derivation — silent migration on login |
+| **v2.1.0** ← current | Upgraded to Argon2id key derivation — silent migration on login |
 | **v2.0.0** | Rebranded from VaultKey to Marai |
 | **v1.7.0** | Passwords never enter Windows clipboard history (Win+V) |
 | **v1.6.0** | Added automatic update checker |
@@ -151,6 +150,34 @@ Meta:         ~/.marai/meta.json  (salt + verification token — no plaintext)
 > Updating from an older version? Security upgrades (like the Argon2id migration in v2.1.0) happen automatically and silently on your first login after updating. No action needed.
 
 See [HOW_TO_UPDATE.md](HOW_TO_UPDATE.md) for full step-by-step instructions.
+
+---
+
+## Backup & Portability
+
+Your vault is fully portable. It is stored in just two files — no database, no cloud, no account.
+
+```
+C:\Users\YourName\.marai\vault.enc   ← encrypted passwords
+C:\Users\YourName\.marai\meta.json   ← salt and verification token
+```
+
+### How to back up your vault
+
+1. Navigate to `C:\Users\YourName\.marai\`
+2. Copy both `vault.enc` and `meta.json` to a safe location — USB drive, external hard drive, or encrypted cloud storage
+3. That's it — both files together are your complete backup
+
+### How to move your vault to a new machine
+
+1. Install Marai on the new machine
+2. Create the folder `C:\Users\YourName\.marai\` if it doesn't exist
+3. Copy `vault.enc` and `meta.json` into that folder
+4. Launch Marai and enter your master password as normal — everything will be there
+
+> **Why this works:** Marai's encryption is based entirely on your master password and the salt in `meta.json`. There is nothing machine-specific involved. Your vault will open on any machine running Marai, anywhere in the world, as long as you know your master password.
+
+> **Security note:** Anyone who obtains both files can attempt to brute force your master password offline. This is why a strong master password matters — and why Marai uses Argon2id to make brute force attacks as slow and expensive as possible.
 
 ---
 
