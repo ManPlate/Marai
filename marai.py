@@ -380,8 +380,7 @@ class LockScreen(tk.Frame):
             # Update the in-memory key so auto-save uses new key
             # Find the VaultApp frame inside app.content
             app = self.winfo_toplevel()
-            content = getattr(app, "content", app)
-            for child in content.winfo_children():
+            for child in app.winfo_children():
                 if hasattr(child, "key"):
                     child.key = new_key
                     break
@@ -561,7 +560,14 @@ class GeneratorDialog(tk.Toplevel):
     def __init__(self, master, on_use=None):
         super().__init__(master)
         self.on_use = on_use   # callback(password) when Use button clicked
-        self._destroy = make_dialog(self, "⚙️  Password Generator", 500, 480)
+        self.title("Password Generator")
+        self.configure(bg=SURFACE)
+        self.resizable(False, False)
+        self.grab_set()
+        w, h = 500, 480
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        self.after(50, lambda: _apply_dwm_to_widget(self))
         self._build()
         self._generate()
 
@@ -704,8 +710,16 @@ class EntryDialog(tk.Toplevel):
         super().__init__(master)
         self.on_save = on_save
         self.entry   = entry
-        _title = "✏️  Edit Entry" if entry else "🗝️  New Entry"
-        self._destroy = make_dialog(self, _title, 460, 540)
+        self.title("Edit Entry" if entry else "New Entry")
+        self.configure(bg=SURFACE)
+        self.resizable(False, False)
+        self.grab_set()
+        w, h = 460, 540
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        self.update_idletasks()
+        self.after(150, lambda: _apply_dwm_to_widget(self))
+        self.bind("<Map>", lambda e: self.after(50, lambda: _apply_dwm_to_widget(self)))
         self._build()
 
     def _lbl(self, parent, text):
@@ -1136,7 +1150,14 @@ class VaultApp(tk.Frame):
 
     def _change_password(self):
         win = tk.Toplevel(self.winfo_toplevel())
-        make_dialog(win, "🔑  Change Master Password", 420, 460)
+        win.title("Change Master Password")
+        win.configure(bg=SURFACE)
+        win.resizable(False, False)
+        win.grab_set()
+        w, h = 420, 460
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        win.after(50, lambda: _apply_dwm_to_widget(win))
 
         pad = tk.Frame(win, bg=SURFACE, padx=30, pady=28)
         pad.pack(fill="both", expand=True)
@@ -1243,7 +1264,14 @@ class VaultApp(tk.Frame):
 
     def _show_about(self):
         win = tk.Toplevel(self.winfo_toplevel())
-        make_dialog(win, "🔐  About Marai", 520, 600)
+        win.title("About Marai")
+        win.configure(bg=SURFACE)
+        win.resizable(False, False)
+        win.grab_set()
+        w, h = 520, 560
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        win.after(50, lambda: _apply_dwm_to_widget(win))
 
         # ── Header (fixed, always visible) ───────────────────────────────
         hdr = tk.Frame(win, bg=SURFACE, padx=30, pady=20)
@@ -1347,141 +1375,85 @@ class VaultApp(tk.Frame):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Custom Title Bar
-# ══════════════════════════════════════════════════════════════════════════════
-TITLEBAR_BG     = "#0a0a10"
-TITLEBAR_H      = 36
-BTN_CLOSE_HOV   = "#c0392b"
-BTN_MIN_HOV     = "#444466"
-BTN_MAX_HOV     = "#444466"
-
-class TitleBar(tk.Frame):
-    def __init__(self, master):
-        super().__init__(master, bg=TITLEBAR_BG, height=TITLEBAR_H)
-        self.pack(fill="x", side="top")
-        self.pack_propagate(False)
-        self._app   = master
-        self._drag_x = 0
-        self._drag_y = 0
-        self._maximised = False
-        self._normal_geo = None
-        self._build()
-        self.bind("<ButtonPress-1>",   self._start_drag)
-        self.bind("<B1-Motion>",       self._do_drag)
-        self.bind("<Double-Button-1>", self._toggle_max)
-
-    def _build(self):
-        import math
-
-        # ── Left: mini logo + name ────────────────────────────────────────
-        left = tk.Frame(self, bg=TITLEBAR_BG)
-        left.pack(side="left", padx=(10, 0))
-
-        # Tiny concentric canvas icon
-        ic = tk.Canvas(left, width=20, height=20,
-                       bg=TITLEBAR_BG, highlightthickness=0)
-        ic.pack(side="left", padx=(0, 6))
-        cx, cy = 10.0, 10.0
-        def rpts(rx, ry, n, rot):
-            pts = []
-            for i in range(n):
-                a = math.radians(rot + i * 360 / n)
-                pts.extend([cx + rx*math.cos(a), cy + ry*math.sin(a)])
-            return pts
-        ic.create_polygon(rpts(8,7.5,7,12),  fill="", outline="#3d2d8a", width=1)
-        ic.create_polygon(rpts(6,5.5,7,5),   fill="", outline=ACCENT,    width=1)
-        ic.create_polygon(rpts(3.5,3.5,7,18),fill="#1e1040", outline="#c4b0ff", width=1)
-        ic.create_oval(cx-2,cy-2,cx+2,cy+2,  fill="#ffffff", outline="")
-        ic.bind("<ButtonPress-1>",   self._start_drag)
-        ic.bind("<B1-Motion>",       self._do_drag)
-        ic.bind("<Double-Button-1>", self._toggle_max)
-
-        name_lbl = tk.Label(left, text="Marai",
-                            font=("Segoe UI", 11, "bold"),
-                            fg=TEXT, bg=TITLEBAR_BG)
-        name_lbl.pack(side="left")
-        name_lbl.bind("<ButtonPress-1>",   self._start_drag)
-        name_lbl.bind("<B1-Motion>",       self._do_drag)
-        name_lbl.bind("<Double-Button-1>", self._toggle_max)
-
-        # ── Right: window controls ────────────────────────────────────────
-        right = tk.Frame(self, bg=TITLEBAR_BG)
-        right.pack(side="right")
-
-        def wbtn(text, cmd, hover):
-            b = tk.Label(right, text=text, width=4, height=1,
-                         font=("Segoe UI", 10), fg="#aaaacc",
-                         bg=TITLEBAR_BG, cursor="hand2")
-            b.pack(side="left")
-            b.bind("<Enter>",    lambda e, w=b, h=hover: w.config(bg=h, fg="white"))
-            b.bind("<Leave>",    lambda e, w=b: w.config(bg=TITLEBAR_BG, fg="#aaaacc"))
-            b.bind("<Button-1>", lambda e: cmd())
-            return b
-
-        wbtn("─", self._minimise,   BTN_MIN_HOV)
-        wbtn("□", self._toggle_max, BTN_MAX_HOV)
-        wbtn("✕", self._close,      BTN_CLOSE_HOV)
-
-    # ── Drag ──────────────────────────────────────────────────────────────
-    def _start_drag(self, e):
-        self._drag_x = e.x_root - self._app.winfo_x()
-        self._drag_y = e.y_root - self._app.winfo_y()
-
-    def _do_drag(self, e):
-        if not self._maximised:
-            x = e.x_root - self._drag_x
-            y = e.y_root - self._drag_y
-            self._app.geometry(f"+{x}+{y}")
-
-    # ── Controls ──────────────────────────────────────────────────────────
-    def _minimise(self):
-        self._app.iconify()
-
-    def _toggle_max(self, e=None):
-        if self._maximised:
-            self._app.geometry(self._normal_geo)
-            self._maximised = False
-        else:
-            self._normal_geo = self._app.geometry()
-            sw = self._app.winfo_screenwidth()
-            sh = self._app.winfo_screenheight()
-            self._app.geometry(f"{sw}x{sh}+0+0")
-            self._maximised = True
-
-    def _close(self):
-        self._app.destroy()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # Root Window
 # ══════════════════════════════════════════════════════════════════════════════
+def _apply_dwm_to_widget(widget):
+    """
+    Gets the real Win32 HWND that owns the title bar and applies dark DWM styling.
+    Uses GetAncestor(GA_ROOT=2) to walk from the inner tkinter frame handle
+    up to the actual top-level window handle that has the caption bar.
+    """
+    try:
+        import ctypes
+        GA_ROOT = 2
+        inner   = widget.winfo_id()
+        hwnd    = ctypes.windll.user32.GetAncestor(inner, GA_ROOT)
+        if not hwnd:
+            hwnd = inner
+        _apply_dwm_dark_titlebar(hwnd)
+    except Exception:
+        pass
+
+
+def _apply_dwm_dark_titlebar(hwnd):
+    """
+    Uses the Windows DWM API to colour the native title bar dark.
+    Works on Windows 11 build 22000+ and Windows 10 build 19041+.
+    Silently skipped on older Windows or non-Windows platforms.
+    """
+    try:
+        import ctypes
+        # Dark mode title bar (Windows 10 20H1+)
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+            ctypes.byref(ctypes.c_int(1)), ctypes.sizeof(ctypes.c_int))
+    except Exception:
+        pass
+
+    try:
+        import ctypes
+        # Title bar background colour (Windows 11 build 22000+)
+        DWMWA_CAPTION_COLOR = 35
+        # Convert BG colour #0e0e16 to COLORREF (BGR format)
+        r, g, b = 0x0e, 0x0e, 0x16
+        colorref = ctypes.c_int(r | (g << 8) | (b << 16))
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_CAPTION_COLOR,
+            ctypes.byref(colorref), ctypes.sizeof(colorref))
+    except Exception:
+        pass
+
+    try:
+        import ctypes
+        # Title bar text colour (Windows 11 build 22000+)
+        DWMWA_TEXT_COLOR = 36
+        # Use our TEXT colour #e4e4f0
+        r, g, b = 0xe4, 0xe4, 0xf0
+        colorref = ctypes.c_int(r | (g << 8) | (b << 16))
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_TEXT_COLOR,
+            ctypes.byref(colorref), ctypes.sizeof(colorref))
+    except Exception:
+        pass
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Marai")
         self.configure(bg=BG)
-
-        # Remove the OS title bar and draw our own
-        self.overrideredirect(True)
-
         w, h = 920, 660
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
         self.minsize(820, 520)
-
         self._set_icon()
-
-        # Restore taskbar presence — overrideredirect removes it by default
-        self.after(10, self._fix_taskbar)
-
-        # Custom title bar sits at the very top
-        self.titlebar = TitleBar(self)
-
-        # Content area below it
-        self.content = tk.Frame(self, bg=BG)
-        self.content.pack(fill="both", expand=True)
-
+        # Apply dark title bar after window is fully created
+        self.after(50, self._apply_theme)
         self._show_lock()
+
+    def _apply_theme(self):
+        _apply_dwm_to_widget(self)
 
     def _set_icon(self):
         import sys
@@ -1493,37 +1465,17 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-    def _fix_taskbar(self):
-        """
-        overrideredirect(True) removes the app from the Windows taskbar.
-        This restores it by setting WS_EX_APPWINDOW on the window handle.
-        Only runs on Windows — silently skipped on other platforms.
-        """
-        try:
-            import ctypes
-            GWL_EXSTYLE     = -20
-            WS_EX_APPWINDOW = 0x00040000
-            WS_EX_TOOLWINDOW= 0x00000080
-            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-            self.wm_withdraw()
-            self.wm_deiconify()
-        except Exception:
-            pass
-
     def _clear(self):
-        for w in self.content.winfo_children():
+        for w in self.winfo_children():
             w.destroy()
 
     def _show_lock(self):
         self._clear()
-        LockScreen(self.content, on_unlock=self._show_vault)
+        LockScreen(self, on_unlock=self._show_vault)
 
     def _show_vault(self, key):
         self._clear()
-        VaultApp(self.content, key=key, on_lock=self._show_lock)
+        VaultApp(self, key=key, on_lock=self._show_lock)
 
 
 if __name__ == "__main__":
