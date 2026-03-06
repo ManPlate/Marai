@@ -6,11 +6,12 @@ Requires: pip install cryptography pyperclip
 
 import tkinter as tk
 from tkinter import messagebox, ttk
-import json, os, base64, secrets, string, threading, urllib.request, webbrowser, subprocess, ctypes, sys
+import json, os, base64, secrets, string, threading, urllib.request, webbrowser, subprocess, ctypes, sys, datetime
 
 # ── Version ────────────────────────────────────────────────────────────────
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 CHANGELOG = [
+    ("2.2.0", "Favourite entries and password age indicator"),
     ("2.1.0", "Upgraded to Argon2id key derivation — silent migration on login"),
     ("2.0.0", "Rebranded from VaultKey to Marai"),
     ("1.7.0", "Passwords never enter Windows clipboard history (Win+V)"),
@@ -192,6 +193,26 @@ CAT_COLORS = {
     "Other":   ("#8888aa", "#18182a"),
 }
 CAT_EMOJI  = {"Work":"💼","Email":"📧","Social":"🌐","Finance":"💳","Dev":"💻","Other":"📁"}
+
+def _password_age(entry):
+    """
+    Returns (age_text, colour) based on when the password was last updated.
+    Green < 30 days, Yellow 30-90 days, Red > 90 days, Grey if unknown.
+    """
+    ts = entry.get("updated_at")
+    if not ts:
+        return "Age unknown", MUTED
+    try:
+        updated = datetime.datetime.fromisoformat(ts)
+        days = (datetime.datetime.now() - updated).days
+        if days < 30:
+            return f"Updated {days}d ago", GREEN
+        elif days < 90:
+            return f"Updated {days}d ago", "#ffb347"
+        else:
+            return f"Updated {days}d ago ⚠", RED
+    except Exception:
+        return "Age unknown", MUTED
 CATEGORIES = list(CAT_COLORS.keys())
 
 # ── Styled Button helper ───────────────────────────────────────────────────
@@ -825,10 +846,16 @@ class EntryDialog(tk.Toplevel):
                                    "Name, Username, and Password are required.",
                                    parent=self)
             return
+        # Stamp updated_at only if password changed (or new entry)
+        existing_pw = (self.entry or {}).get("password", "")
+        now_ts = datetime.datetime.now().isoformat(timespec="seconds")
+        updated_at = now_ts if (p != existing_pw or not self.entry) else self.entry.get("updated_at", now_ts)
         self.on_save({"name": n, "user": u, "password": p,
                       "url": self.v_url.get().strip(),
                       "notes": self.v_notes.get().strip(),
-                      "category": self.v_cat.get()})
+                      "category": self.v_cat.get(),
+                      "updated_at": updated_at,
+                      "favourite": (self.entry or {}).get("favourite", False)})
         self.destroy()
 
 
@@ -861,6 +888,15 @@ class VaultApp(tk.Frame):
         with open(VAULT_FILE, "rb") as f:
             raw = f.read()
         self.vault = json.loads(decrypt_data(self.key, raw))
+        # Backfill missing updated_at for existing entries
+        now_ts = datetime.datetime.now().isoformat(timespec="seconds")
+        changed = False
+        for entry in self.vault:
+            if not entry.get("updated_at"):
+                entry["updated_at"] = now_ts
+                changed = True
+        if changed:
+            self._save_vault()
 
     def _save_vault(self):
         raw = encrypt_data(self.key, json.dumps(self.vault))
@@ -963,6 +999,9 @@ class VaultApp(tk.Frame):
                     or q in e.get("category","").lower()
                     or q in e.get("url","").lower()]
 
+        # Favourites always appear first
+        filtered.sort(key=lambda e: (not e.get("favourite", False),))
+
         n = len(self.vault)
         self.count_lbl.config(text=f"{n} entr{'y' if n==1 else 'ies'}")
 
@@ -1012,6 +1051,23 @@ class VaultApp(tk.Frame):
 
         acts = tk.Frame(hdr, bg=SURFACE)
         acts.pack(side="right")
+
+        # ── Favourite star button ─────────────────────────────────────────
+        is_fav = entry.get("favourite", False)
+        star_lbl = tk.Button(acts,
+                             text="★" if is_fav else "☆",
+                             font=("Segoe UI", 13),
+                             bg=SURFACE, fg="#f5c518" if is_fav else MUTED,
+                             relief="flat", cursor="hand2", bd=0, padx=4)
+        star_lbl.pack(side="left", padx=2)
+
+        def _toggle_fav(i=idx, btn=star_lbl):
+            self.vault[i]["favourite"] = not self.vault[i].get("favourite", False)
+            self._save_vault()
+            self._render()
+
+        star_lbl.config(command=_toggle_fav)
+
         tk.Button(acts, text="✏️", font=FNT_SM, bg=SURFACE2, fg=TEXT,
                   relief="flat", cursor="hand2", bd=0, padx=6,
                   command=lambda i=idx: self._edit(i)).pack(side="left", padx=2)
@@ -1027,6 +1083,11 @@ class VaultApp(tk.Frame):
         if entry.get("notes"):
             tk.Label(inner, text=f"📝  {entry['notes']}",
                      font=FNT_SM, fg=MUTED, bg=SURFACE, anchor="w").pack(anchor="w", pady=(4,0))
+
+        # ── Password age indicator ────────────────────────────────────────
+        age_text, age_colour = _password_age(entry)
+        tk.Label(inner, text=age_text, font=FNT_SM,
+                 fg=age_colour, bg=SURFACE, anchor="w").pack(anchor="w", pady=(6,0))
 
     def _field(self, parent, label, value, idx, masked):
         row = tk.Frame(parent, bg=SURFACE2)
