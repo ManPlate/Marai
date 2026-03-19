@@ -11,11 +11,12 @@ Sacred knowledge concealed from the world, accessible only to those who hold the
 
 ---
 
-[![Version](https://img.shields.io/badge/version-2.1.0-7c5cfc?style=flat-square)](https://github.com/ManPlate/Marai/releases)
+[![Version](https://img.shields.io/badge/version-2.3.0-7c5cfc?style=flat-square)](https://github.com/ManPlate/Marai/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows)](https://github.com/ManPlate/Marai/releases)
 [![License](https://img.shields.io/badge/license-MIT-4ecca3?style=flat-square)](LICENSE)
 [![Encryption](https://img.shields.io/badge/encryption-AES--256--GCM-fc5c7d?style=flat-square)](#security)
 [![KDF](https://img.shields.io/badge/KDF-Argon2id-fc5c7d?style=flat-square)](#security)
+[![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-ea4aaa?style=flat-square&logo=github-sponsors)](https://github.com/sponsors/ManPlate)
 
 **[⬇️ Download Latest Release](https://github.com/ManPlate/Marai/releases)** &nbsp;·&nbsp;
 **[📋 View Changelog](#version-history)** &nbsp;·&nbsp;
@@ -127,7 +128,8 @@ Meta:         ~/.marai/meta.json  (salt + verification token — no plaintext)
 <!-- VERSION_TABLE_START -->
 | Version | What's New |
 |---|---|
-| **v2.2.0** ← current | Favourite entries and password age indicator |
+| **v2.3.0** ← current | RDP session launch from Server entries |
+| **v2.2.0** | Favourite entries and password age indicator |
 | **v2.1.0** | Upgraded to Argon2id key derivation — silent migration on login |
 | **v2.0.0** | Rebranded from VaultKey to Marai |
 | **v1.7.0** | Passwords never enter Windows clipboard history (Win+V) |
@@ -179,6 +181,18 @@ C:\Users\YourName\.marai\meta.json   ← salt and verification token
 > **Why this works:** Marai's encryption is based entirely on your master password and the salt in `meta.json`. There is nothing machine-specific involved. Your vault will open on any machine running Marai, anywhere in the world, as long as you know your master password.
 
 > **Security note:** Anyone who obtains both files can attempt to brute force your master password offline. This is why a strong master password matters — and why Marai uses Argon2id to make brute force attacks as slow and expensive as possible.
+
+---
+
+## Support Marai
+
+Marai is free and open source. If you find it useful, consider supporting its development — it helps keep the project maintained and growing.
+
+<div align="center">
+
+[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor%20on%20GitHub-%E2%9D%A4-ea4aaa?style=for-the-badge&logo=github-sponsors)](https://github.com/sponsors/ManPlate)
+
+</div>
 
 ---
 
