@@ -48,10 +48,13 @@ Marai is a **fully offline**, open source password manager for Windows. Your pas
 | **Fully Offline** | No network requests except optional update checks |
 
 ### 🗂️ Password Management
-- Organise entries by category — **Work, Email, Social, Finance, Dev, Other**
+- Organise entries by category — **Work, Email, Social, Finance, Dev, Server, Other**
+- **Server entries** — store RDP and Azure Virtual Desktop credentials and launch sessions in one click
 - Instant search across all entries
 - Password strength meter — see how strong any password is at a glance
 - Built-in password generator with customisable length and character sets
+- Favourite entries — star important entries to pin them to the top
+- Password age indicator — colour-coded flag for stale passwords
 - Show/hide individual passwords
 - One-click copy to clipboard
 - Edit and delete entries
@@ -128,7 +131,7 @@ Meta:         ~/.marai/meta.json  (salt + verification token — no plaintext)
 <!-- VERSION_TABLE_START -->
 | Version | What's New |
 |---|---|
-| **v2.3.0** ← current | RDP session launch from Server entries |
+| **v2.3.0** ← current | Server category with RDP and Azure Virtual Desktop launch |
 | **v2.2.0** | Favourite entries and password age indicator |
 | **v2.1.0** | Upgraded to Argon2id key derivation — silent migration on login |
 | **v2.0.0** | Rebranded from VaultKey to Marai |

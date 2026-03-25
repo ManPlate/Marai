@@ -9,8 +9,9 @@ from tkinter import messagebox, ttk
 import json, os, base64, secrets, string, threading, urllib.request, webbrowser, subprocess, ctypes, sys, datetime
 
 # ── Version ────────────────────────────────────────────────────────────────
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 CHANGELOG = [
+    ("2.3.0", "RDP session launch from Server entries"),
     ("2.2.0", "Favourite entries and password age indicator"),
     ("2.1.0", "Upgraded to Argon2id key derivation — silent migration on login"),
     ("2.0.0", "Rebranded from VaultKey to Marai"),
@@ -185,6 +186,7 @@ FNT_SM     = ("Segoe UI", 9)
 FNT_BTN    = ("Segoe UI", 11, "bold")
 
 CAT_COLORS = {
+    "Server":  ("#60d0a0", "#0e2a20"),
     "Work":    ("#9f7eff", "#1a1035"),
     "Email":   ("#ff7a9a", "#300f20"),
     "Social":  ("#4ecca3", "#0e2e27"),
@@ -192,7 +194,7 @@ CAT_COLORS = {
     "Dev":     ("#61dafb", "#0a2030"),
     "Other":   ("#8888aa", "#18182a"),
 }
-CAT_EMOJI  = {"Work":"💼","Email":"📧","Social":"🌐","Finance":"💳","Dev":"💻","Other":"📁"}
+CAT_EMOJI  = {"Work":"💼","Email":"📧","Social":"🌐","Finance":"💳","Dev":"💻","Server":"🖥","Other":"📁"}
 
 def _password_age(entry):
     """
@@ -239,6 +241,31 @@ def mk_entry(parent, var, show=None, mono=False, w=30):
 # ══════════════════════════════════════════════════════════════════════════════
 # Lock Screen
 # ══════════════════════════════════════════════════════════════════════════════
+def _draw_concentric_logo(canvas, cx, cy, size, bg):
+    """
+    Draw the MARAi concentric heptagon logo on a canvas.
+    size controls the outermost ring radius.
+    bg is the canvas background colour — used for the inner fill.
+    """
+    import math
+    def pts(rx, ry, n, rot):
+        p = []
+        for i in range(n):
+            a = math.radians(rot + i * 360 / n)
+            p.extend([cx + rx * math.cos(a), cy + ry * math.sin(a)])
+        return p
+
+    s = size / 60  # scale factor relative to design size 60
+    canvas.create_polygon(pts(52*s,48*s,7,12), fill="", outline="#2a1f5e", width=1)
+    canvas.create_polygon(pts(46*s,42*s,7,22), fill="", outline="#3d2d8a", width=1)
+    canvas.create_polygon(pts(39*s,36*s,7,5),  fill="", outline="#5438b0", width=2*s if 2*s > 1 else 1)
+    canvas.create_polygon(pts(31*s,29*s,7,18), fill="", outline=ACCENT,    width=2*s if 2*s > 1 else 1)
+    canvas.create_polygon(pts(22*s,21*s,7,8),  fill="", outline="#9d7fff", width=2*s if 2*s > 1 else 1)
+    canvas.create_polygon(pts(13*s,13*s,7,20), fill="#1e1040", outline="#c4b0ff", width=max(1, 1.5*s))
+    canvas.create_oval(cx-9*s, cy-9*s, cx+9*s, cy+9*s, fill="#c4b0ff", outline="")
+    canvas.create_oval(cx-5*s, cy-5*s, cx+5*s, cy+5*s, fill="#ffffff",  outline="")
+
+
 class LockScreen(tk.Frame):
     def __init__(self, master, on_unlock):
         super().__init__(master, bg=BG)
@@ -250,57 +277,15 @@ class LockScreen(tk.Frame):
         center = tk.Frame(self, bg=BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        # ── Concentric logo icon (matches marai_logo.svg) ────────────────
+        # ── Concentric logo icon ──────────────────────────────────────────
         icon_size = 120
         c = tk.Canvas(center, width=icon_size, height=icon_size,
                       bg=BG, highlightthickness=0)
         c.pack(pady=(0, 10))
-        cx, cy = icon_size / 2, icon_size / 2
-
-        import math
-
-        def ring_points(cx, cy, rx, ry, n_sides, rotation_deg):
-            """Generate polygon points for an irregular ring."""
-            pts = []
-            for i in range(n_sides):
-                angle = math.radians(rotation_deg + i * 360 / n_sides)
-                x = cx + rx * math.cos(angle)
-                y = cy + ry * math.sin(angle)
-                pts.extend([x, y])
-            return pts
-
-        # Layer 6 — outermost, faintest
-        pts = ring_points(cx, cy, 52, 48, 7, 12)
-        c.create_polygon(pts, fill="", outline="#2a1f5e", width=1, smooth=False)
-
-        # Layer 5
-        pts = ring_points(cx, cy, 46, 42, 7, 22)
-        c.create_polygon(pts, fill="", outline="#3d2d8a", width=1, smooth=False)
-
-        # Layer 4
-        pts = ring_points(cx, cy, 39, 36, 7, 5)
-        c.create_polygon(pts, fill="", outline="#5438b0", width=2, smooth=False)
-
-        # Layer 3
-        pts = ring_points(cx, cy, 31, 29, 7, 18)
-        c.create_polygon(pts, fill="", outline=ACCENT, width=2, smooth=False)
-
-        # Layer 2 — brighter
-        pts = ring_points(cx, cy, 22, 21, 7, 8)
-        c.create_polygon(pts, fill="", outline="#9d7fff", width=2, smooth=False)
-
-        # Layer 1 — innermost ring with fill
-        pts = ring_points(cx, cy, 13, 13, 7, 20)
-        c.create_polygon(pts, fill="#1e1040", outline="#c4b0ff", width=1.5, smooth=False)
-
-        # Core glow
-        c.create_oval(cx-9, cy-9, cx+9, cy+9,
-                      fill="#c4b0ff", outline="", width=0)
-        c.create_oval(cx-5, cy-5, cx+5, cy+5,
-                      fill="#ffffff", outline="", width=0)
+        _draw_concentric_logo(c, icon_size/2, icon_size/2, icon_size/2, BG)
 
         # ── Name with letter spacing ──────────────────────────────────────
-        tk.Label(center, text="M  A  R  A  I",
+        tk.Label(center, text="M  A  R  A  i",
                  font=("Segoe UI", 26, "bold"),
                  fg=ACCENT, bg=BG).pack()
         tk.Label(center, text="your offline password vault — hidden by design",
@@ -475,8 +460,7 @@ def make_dialog(win, title, w, h):
     """
     win.overrideredirect(True)
     win.configure(bg=SURFACE)
-    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-    win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+    _centre_on_parent(win, win.master if win.master else win, w, h)
     win.grab_set()
 
     # Title bar frame
@@ -585,9 +569,14 @@ class GeneratorDialog(tk.Toplevel):
         self.configure(bg=SURFACE)
         self.resizable(False, False)
         self.grab_set()
+        try:
+            _ico = getattr(master.winfo_toplevel(), "_ico_path", None)
+            if _ico:
+                self.iconbitmap(_ico)
+        except Exception:
+            pass
         w, h = 500, 480
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        _centre_on_parent(self, master, w, h)
         self.after(50, lambda: _apply_dwm_to_widget(self))
         self._build()
         self._generate()
@@ -733,23 +722,51 @@ class EntryDialog(tk.Toplevel):
         self.entry   = entry
         self.title("Edit Entry" if entry else "New Entry")
         self.configure(bg=SURFACE)
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.grab_set()
-        w, h = 460, 540
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
-        self.update_idletasks()
+        try:
+            _ico = getattr(master.winfo_toplevel(), "_ico_path", None)
+            if _ico:
+                self.iconbitmap(_ico)
+        except Exception:
+            pass
+        w, h = 460, 580
+        _centre_on_parent(self, master, w, h)
+        self.minsize(420, 460)
         self.after(150, lambda: _apply_dwm_to_widget(self))
         self.bind("<Map>", lambda e: self.after(50, lambda: _apply_dwm_to_widget(self)))
         self._build()
 
-    def _lbl(self, parent, text):
-        tk.Label(parent, text=text, font=FNT_SM,
-                 fg=MUTED, bg=SURFACE).pack(anchor="w")
+    def _lbl(self, parent, text, ret=False):
+        lbl = tk.Label(parent, text=text, font=FNT_SM, fg=MUTED, bg=SURFACE)
+        lbl.pack(anchor="w")
+        if ret:
+            return lbl
 
     def _build(self):
-        pad = tk.Frame(self, bg=SURFACE, padx=30, pady=24)
-        pad.pack(fill="both", expand=True)
+        # Scrollable canvas so all fields are always reachable regardless of window height
+        canvas = tk.Canvas(self, bg=SURFACE, highlightthickness=0)
+        sb = ttk.Scrollbar(self, orient="vertical", command=canvas.yview,
+                           style="Dark.Vertical.TScrollbar")
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        pad = tk.Frame(canvas, bg=SURFACE, padx=30, pady=24)
+        win_id = canvas.create_window((0, 0), window=pad, anchor="nw")
+
+        def _on_frame_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_configure(e):
+            canvas.itemconfig(win_id, width=e.width)
+        pad.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse wheel scrolling
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
         tk.Label(pad, text="✏️  Edit Entry" if self.entry else "🗝️  New Entry",
                  font=FNT_HEAD, fg=TEXT, bg=SURFACE).pack(anchor="w", pady=(0,18))
@@ -761,6 +778,9 @@ class EntryDialog(tk.Toplevel):
         self.v_url   = tk.StringVar(value=g.get("url",""))
         self.v_notes = tk.StringVar(value=g.get("notes",""))
         self.v_cat   = tk.StringVar(value=g.get("category","Work"))
+        self.v_host      = tk.StringVar(value=g.get("host",""))
+        self.v_port      = tk.StringVar(value=g.get("port","3389"))
+        self.v_workspace = tk.StringVar(value=g.get("workspace",""))
 
         self._lbl(pad, "SERVICE / APP NAME")
         mk_entry(pad, self.v_name, w=38).pack(fill="x", ipady=9, pady=(4,14))
@@ -795,26 +815,79 @@ class EntryDialog(tk.Toplevel):
         self.str_bar.place(x=0, y=0, relheight=1, relwidth=0)
         self._update_pw_strength()
 
-        self._lbl(pad, "URL (optional)")
-        mk_entry(pad, self.v_url, w=38).pack(fill="x", ipady=9, pady=(4,14))
+        # Single container that always sits between password and category.
+        # We show either the URL section or the server section inside it —
+        # the container itself never moves, so layout order is always correct.
+        conn = tk.Frame(pad, bg=SURFACE)
+        conn.pack(fill="x")
+
+        # ── URL section (non-server entries) ─────────────────────────────
+        self._url_frame = tk.Frame(conn, bg=SURFACE)
+        self._url_lbl   = tk.Label(self._url_frame, text="URL (optional)",
+                                   font=FNT_SM, fg=MUTED, bg=SURFACE)
+        self._url_lbl.pack(anchor="w")
+        self._url_ent   = mk_entry(self._url_frame, self.v_url, w=38)
+        self._url_ent.pack(fill="x", ipady=9, pady=(4,14))
+
+        # ── Server section (Server category only) ────────────────────────
+        self._srv_frame = tk.Frame(conn, bg=SURFACE)
+
+        tk.Label(self._srv_frame, text="HOST / IP ADDRESS",
+                 font=FNT_SM, fg=MUTED, bg=SURFACE).pack(anchor="w")
+        self._host_ent = mk_entry(self._srv_frame, self.v_host, w=38)
+        self._host_ent.pack(fill="x", ipady=9, pady=(4,6))
+
+        port_row = tk.Frame(self._srv_frame, bg=SURFACE)
+        port_row.pack(fill="x", pady=(0,14))
+        tk.Label(port_row, text="PORT", font=FNT_SM,
+                 fg=MUTED, bg=SURFACE).pack(side="left", anchor="w")
+        mk_entry(port_row, self.v_port, w=8).pack(side="left", ipady=9, padx=(8,0))
+
+        tk.Label(self._srv_frame, text="AVD WORKSPACE URL (optional)",
+                 font=FNT_SM, fg=MUTED, bg=SURFACE).pack(anchor="w")
+        self._ws_ent = mk_entry(self._srv_frame, self.v_workspace, w=38)
+        self._ws_ent.pack(fill="x", ipady=9, pady=(4,2))
+        tk.Label(self._srv_frame,
+                 text="Leave blank for standard RDP. Add workspace URL for Azure Virtual Desktop.",
+                 font=FNT_SM, fg=MUTED, bg=SURFACE,
+                 wraplength=380, justify="left").pack(anchor="w", pady=(0,12))
 
         self._lbl(pad, "CATEGORY")
         cat_f = tk.Frame(pad, bg=SURFACE)
-        cat_f.pack(anchor="w", pady=(4,16))
-        for cat in CATEGORIES:
+        cat_f.pack(anchor="w", fill="x", pady=(4,16))
+        # Split into two rows of 4 to avoid clipping
+        row1 = tk.Frame(cat_f, bg=SURFACE)
+        row1.pack(anchor="w", pady=(0,4))
+        row2 = tk.Frame(cat_f, bg=SURFACE)
+        row2.pack(anchor="w")
+        for i, cat in enumerate(CATEGORIES):
             c, _ = CAT_COLORS[cat]
-            tk.Radiobutton(cat_f, text=f"{CAT_EMOJI[cat]} {cat}",
+            parent = row1 if i < 4 else row2
+            tk.Radiobutton(parent, text=f"{CAT_EMOJI[cat]} {cat}",
                            variable=self.v_cat, value=cat,
                            bg=SURFACE, fg=c, selectcolor=SURFACE2,
                            activebackground=SURFACE, activeforeground=c,
                            font=FNT_SM, relief="flat",
-                           cursor="hand2").pack(side="left", padx=(0,10))
+                           cursor="hand2",
+                           command=self._on_cat_change).pack(side="left", padx=(0,10))
+
+        self._on_cat_change()  # set initial visibility
 
         btn_row = tk.Frame(pad, bg=SURFACE)
         btn_row.pack(fill="x", pady=(6,0))
         mk_btn(btn_row, "Cancel", self.destroy,
                bg=SURFACE2, fg=MUTED, w=12).pack(side="left")
         mk_btn(btn_row, "Save Entry", self._save, w=16).pack(side="right")
+
+    def _on_cat_change(self):
+        """Show server fields for Server category, URL field for everything else."""
+        is_server = self.v_cat.get() == "Server"
+        if is_server:
+            self._url_frame.pack_forget()
+            self._srv_frame.pack(fill="x")
+        else:
+            self._srv_frame.pack_forget()
+            self._url_frame.pack(fill="x")
 
     def _toggle_pw(self):
         self.show_pw = not self.show_pw
@@ -854,6 +927,9 @@ class EntryDialog(tk.Toplevel):
                       "url": self.v_url.get().strip(),
                       "notes": self.v_notes.get().strip(),
                       "category": self.v_cat.get(),
+                      "host": self.v_host.get().strip(),
+                      "port": self.v_port.get().strip() or "3389",
+                      "workspace": self.v_workspace.get().strip(),
                       "updated_at": updated_at,
                       "favourite": (self.entry or {}).get("favourite", False)})
         self.destroy()
@@ -910,7 +986,11 @@ class VaultApp(tk.Frame):
         hdr.pack(fill="x")
         left = tk.Frame(hdr, bg=SURFACE)
         left.pack(side="left", padx=20)
-        tk.Label(left, text="🔐  MARAI", font=("Segoe UI",15,"bold"),
+        # Small concentric logo in header
+        logo_c = tk.Canvas(left, width=28, height=28, bg=SURFACE, highlightthickness=0)
+        logo_c.pack(side="left", padx=(0,8))
+        _draw_concentric_logo(logo_c, 14, 14, 14, SURFACE)
+        tk.Label(left, text="MARAi", font=("Segoe UI",15,"bold"),
                  fg=ACCENT, bg=SURFACE).pack(side="left")
         tk.Label(left, text=f"v{VERSION}", font=("Courier New",9),
                  fg=MUTED, bg=SURFACE).pack(side="left", padx=(8,0), pady=(4,0))
@@ -922,7 +1002,7 @@ class VaultApp(tk.Frame):
         self.lock_timer_lbl.pack(side="left", padx=(0,10))
         self._update_lock_timer_display()
         mk_btn(right, "+ Add", self._add_entry, w=7).pack(side="left", padx=(0,6))
-        mk_btn(right, "⚙️ Gen", self._open_generator, bg=SURFACE2, fg=MUTED, w=7).pack(side="left", padx=(0,6))
+        mk_btn(right, "⚙️ Generate", self._open_generator, bg=SURFACE2, fg=MUTED, w=12).pack(side="left", padx=(0,6))
         mk_btn(right, "🔑 Passwd", self._change_password, bg=SURFACE2, fg=MUTED, w=9).pack(side="left", padx=(0,6))
         mk_btn(right, "ℹ About", self._show_about, bg=SURFACE2, fg=MUTED, w=8).pack(side="left", padx=(0,6))
         mk_btn(right, "🔒 Lock", self.on_lock, bg=SURFACE2, fg=MUTED, w=8).pack(side="left")
@@ -1078,8 +1158,30 @@ class VaultApp(tk.Frame):
         tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", pady=10)
         self._field(inner, "User", entry.get("user",""),     idx, masked=False)
         self._field(inner, "Pass", entry.get("password",""), idx, masked=True)
-        if entry.get("url"):
-            self._field(inner, "URL", entry["url"], idx, masked=False)
+
+        if cat == "Server":
+            host      = entry.get("host","")
+            port      = entry.get("port","3389")
+            workspace = entry.get("workspace","").strip()
+            is_avd    = bool(workspace)
+            if host:
+                self._field(inner, "Host", f"{host}:{port}" if port != "3389" else host,
+                            idx, masked=False)
+            if is_avd:
+                # Show truncated workspace URL as info
+                ws_display = workspace if len(workspace) <= 48 else workspace[:45] + "..."
+                tk.Label(inner, text=f"☁  AVD  •  {ws_display}",
+                         font=FNT_SM, fg="#60d0a0", bg=SURFACE,
+                         anchor="w", wraplength=340).pack(anchor="w", pady=(4,0))
+            btn_label = "▶  Connect via AVD" if is_avd else "▶  Connect via RDP"
+            mk_btn(inner, btn_label,
+                   lambda i=idx: self._rdp_connect(i),
+                   bg="#1a5c3a", fg="#60d0a0", w=22
+                   ).pack(anchor="w", pady=(10,2))
+        else:
+            if entry.get("url"):
+                self._field(inner, "URL", entry["url"], idx, masked=False)
+
         if entry.get("notes"):
             tk.Label(inner, text=f"📝  {entry['notes']}",
                      font=FNT_SM, fg=MUTED, bg=SURFACE, anchor="w").pack(anchor="w", pady=(4,0))
@@ -1173,7 +1275,7 @@ class VaultApp(tk.Frame):
 
     def _show_update_banner(self, new_version):
         self._update_lbl.config(
-            text=f"🎉  Marai v{new_version} is available!  You are on v{VERSION}.")
+            text=f"🎉  MARAi v{new_version} is available!  You are on v{VERSION}.")
         self._update_banner.pack(fill="x", after=self.winfo_children()[0])
 
     def _dismiss_update_banner(self):
@@ -1215,9 +1317,14 @@ class VaultApp(tk.Frame):
         win.configure(bg=SURFACE)
         win.resizable(False, False)
         win.grab_set()
+        try:
+            _ico = getattr(self.winfo_toplevel(), "_ico_path", None)
+            if _ico:
+                win.iconbitmap(_ico)
+        except Exception:
+            pass
         w, h = 420, 460
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        _centre_on_parent(win, self.winfo_toplevel(), w, h)
         win.after(50, lambda: _apply_dwm_to_widget(win))
 
         pad = tk.Frame(win, bg=SURFACE, padx=30, pady=28)
@@ -1325,37 +1432,28 @@ class VaultApp(tk.Frame):
 
     def _show_about(self):
         win = tk.Toplevel(self.winfo_toplevel())
-        win.title("About Marai")
+        win.title("About MARAi")
         win.configure(bg=SURFACE)
         win.resizable(False, False)
         win.grab_set()
+        try:
+            _ico = getattr(self.winfo_toplevel(), "_ico_path", None)
+            if _ico:
+                win.iconbitmap(_ico)
+        except Exception:
+            pass
         w, h = 520, 560
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        _centre_on_parent(win, self.winfo_toplevel(), w, h)
         win.after(50, lambda: _apply_dwm_to_widget(win))
 
         # ── Header (fixed, always visible) ───────────────────────────────
         hdr = tk.Frame(win, bg=SURFACE, padx=30, pady=20)
         hdr.pack(fill="x")
-        # Small concentric icon for About dialog
-        import math
+        # Concentric logo for About dialog
         ac = tk.Canvas(hdr, width=64, height=64, bg=SURFACE, highlightthickness=0)
         ac.pack()
-        ax, ay = 32.0, 32.0
-        def aring(cx, cy, rx, ry, n, rot):
-            pts = []
-            for i in range(n):
-                a = math.radians(rot + i * 360 / n)
-                pts.extend([cx + rx*math.cos(a), cy + ry*math.sin(a)])
-            return pts
-        ac.create_polygon(aring(ax,ay,28,26,7,12), fill="", outline="#2a1f5e", width=1)
-        ac.create_polygon(aring(ax,ay,23,21,7,22), fill="", outline="#3d2d8a", width=1)
-        ac.create_polygon(aring(ax,ay,18,17,7,5),  fill="", outline=ACCENT,    width=1.5)
-        ac.create_polygon(aring(ax,ay,12,12,7,18), fill="", outline="#9d7fff",  width=1.5)
-        ac.create_polygon(aring(ax,ay,7,7,7,20),   fill="#1e1040", outline="#c4b0ff", width=1)
-        ac.create_oval(ax-5,ay-5,ax+5,ay+5, fill="#c4b0ff", outline="")
-        ac.create_oval(ax-2.5,ay-2.5,ax+2.5,ay+2.5, fill="#ffffff", outline="")
-        tk.Label(hdr, text="M  A  R  A  I", font=("Segoe UI",18,"bold"),
+        _draw_concentric_logo(ac, 32, 32, 32, SURFACE)
+        tk.Label(hdr, text="M  A  R  A  i", font=("Segoe UI",18,"bold"),
                  fg=ACCENT, bg=SURFACE).pack()
         tk.Label(hdr, text=f"Version {VERSION}", font=FNT_SM,
                  fg=MUTED, bg=SURFACE).pack(pady=(2,0))
@@ -1421,6 +1519,26 @@ class VaultApp(tk.Frame):
             self._save_vault(); self._render()
         EntryDialog(self.winfo_toplevel(), on_save)
 
+    def _rdp_connect(self, idx):
+        entry     = self.vault[idx]
+        host      = entry.get("host","").strip()
+        port      = entry.get("port","3389").strip()
+        username  = entry.get("user","").strip()
+        password  = entry.get("password","")
+        workspace = entry.get("workspace","").strip()
+
+        if not workspace and not host:
+            messagebox.showwarning("Missing Details",
+                                   "No host address or workspace URL stored for this entry.",
+                                   parent=self.winfo_toplevel())
+            return
+
+        ok, err = _launch_rdp(host, port, username, password, workspace)
+        if not ok:
+            messagebox.showerror("Connection Error",
+                                 f"Could not launch session:\n\n{err}",
+                                 parent=self.winfo_toplevel())
+
     def _edit(self, idx):
         def on_save(r):
             self.vault[idx] = r
@@ -1438,6 +1556,131 @@ class VaultApp(tk.Frame):
 # ══════════════════════════════════════════════════════════════════════════════
 # Root Window
 # ══════════════════════════════════════════════════════════════════════════════
+def _launch_rdp(host, port, username, password, workspace=""):
+    """
+    Launch an RDP or AVD session.
+
+    AVD (workspace URL provided):
+      - Tries ms-avd: URI to open Windows App directly
+      - Falls back to opening the workspace URL in the default browser
+      - User authenticates via Azure AD in the client — Marai just launches it
+
+    Standard RDP (no workspace URL):
+      - Windows: writes credentials to Credential Manager, launches mstsc.exe,
+        cleans up credentials after 10 seconds
+      - Linux: launches xfreerdp if available
+    """
+    import subprocess
+
+    # ── AVD path ──────────────────────────────────────────────────────────────
+    if workspace:
+        if sys.platform == "win32":
+            try:
+                # Try Windows App (ms-rd:) URI first — modern AVD client
+                # Falls back to Remote Desktop app (ms-avd:) URI
+                # Both open the correct AVD workspace if the app is installed
+                import urllib.parse
+                encoded_ws = urllib.parse.quote(workspace, safe="")
+                uri = f"ms-avd:connect?workspaceId={encoded_ws}"
+                result = subprocess.run(
+                    ["cmd", "/c", "start", "", uri],
+                    capture_output=True, timeout=5
+                )
+                return True, None
+            except Exception:
+                pass
+        # Fallback for all platforms — open workspace URL in browser
+        try:
+            webbrowser.open(workspace)
+            return True, None
+        except Exception as e:
+            return False, f"Could not open workspace URL: {e}"
+
+    # ── Standard RDP path ────────────────────────────────────────────────────
+    target = f"{host}:{port}" if port and str(port) != "3389" else host
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            CRED_TYPE_GENERIC    = 1
+            CRED_PERSIST_SESSION = 1
+
+            class CREDENTIAL(ctypes.Structure):
+                _fields_ = [
+                    ("Flags",              wintypes.DWORD),
+                    ("Type",               wintypes.DWORD),
+                    ("TargetName",         wintypes.LPWSTR),
+                    ("Comment",            wintypes.LPWSTR),
+                    ("LastWritten",        ctypes.c_int64),
+                    ("CredentialBlobSize", wintypes.DWORD),
+                    ("CredentialBlob",     ctypes.POINTER(ctypes.c_byte)),
+                    ("Persist",            wintypes.DWORD),
+                    ("AttributeCount",     wintypes.DWORD),
+                    ("Attributes",         ctypes.c_void_p),
+                    ("TargetAlias",        wintypes.LPWSTR),
+                    ("UserName",           wintypes.LPWSTR),
+                ]
+
+            advapi  = ctypes.windll.advapi32
+            pw_bytes = (password + "\x00").encode("utf-16-le")
+            blob     = (ctypes.c_byte * len(pw_bytes))(*pw_bytes)
+
+            cred                    = CREDENTIAL()
+            cred.Flags              = 0
+            cred.Type               = CRED_TYPE_GENERIC
+            cred.TargetName         = f"TERMSRV/{target}"
+            cred.Comment            = "Added by Marai — auto removed after launch"
+            cred.CredentialBlobSize = len(pw_bytes)
+            cred.CredentialBlob     = blob
+            cred.Persist            = CRED_PERSIST_SESSION
+            cred.UserName           = username
+
+            advapi.CredWriteW(ctypes.byref(cred), 0)
+            subprocess.Popen(["mstsc.exe", f"/v:{target}"])
+
+            def _cleanup():
+                import time; time.sleep(10)
+                try:
+                    advapi.CredDeleteW(f"TERMSRV/{target}", CRED_TYPE_GENERIC, 0)
+                except Exception:
+                    pass
+            threading.Thread(target=_cleanup, daemon=True).start()
+            return True, None
+
+        except Exception as e:
+            return False, str(e)
+
+    else:
+        # Linux — try xfreerdp
+        try:
+            cmd = ["xfreerdp", f"/v:{target}", f"/u:{username}",
+                   f"/p:{password}", "/cert:ignore", "+clipboard"]
+            subprocess.Popen(cmd)
+            return True, None
+        except FileNotFoundError:
+            return False, "xfreerdp not found. Install it with: sudo apt install freerdp2-x11"
+        except Exception as e:
+            return False, str(e)
+
+
+def _centre_on_parent(win, parent, w, h):
+    """Centre a dialog over its parent window — works on any monitor."""
+    try:
+        parent.update_idletasks()
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        x  = px + (pw - w) // 2
+        y  = py + (ph - h) // 2
+    except Exception:
+        x  = (win.winfo_screenwidth()  - w) // 2
+        y  = (win.winfo_screenheight() - h) // 2
+    win.geometry(f"{w}x{h}+{x}+{y}")
+
+
 def _apply_dwm_to_widget(widget):
     """
     Gets the real Win32 HWND that owns the title bar and applies dark DWM styling.
@@ -1502,7 +1745,7 @@ def _apply_dwm_dark_titlebar(hwnd):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Marai")
+        self.title("MARAi")
         self.configure(bg=BG)
         w, h = 920, 660
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
@@ -1525,6 +1768,8 @@ class App(tk.Tk):
                 self.iconbitmap(ico)
             except Exception:
                 pass
+        # Store path for dialogs to use
+        self._ico_path = ico if os.path.exists(ico) else None
 
     def _clear(self):
         for w in self.winfo_children():
