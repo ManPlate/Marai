@@ -9,8 +9,10 @@ from tkinter import messagebox, ttk
 import json, os, base64, secrets, string, threading, urllib.request, webbrowser, subprocess, ctypes, sys, datetime
 
 # ── Version ────────────────────────────────────────────────────────────────
-VERSION = "2.3.0"
+VERSION = "2.4.1"
 CHANGELOG = [
+    ("2.4.1", "Portable USB mode — zero setup on any machine"),
+    ("2.4.0", "Category filters, URL launch, search all fields, custom vault folder"),
     ("2.3.0", "RDP session launch from Server entries"),
     ("2.2.0", "Favourite entries and password age indicator"),
     ("2.1.0", "Upgraded to Argon2id key derivation — silent migration on login"),
@@ -72,26 +74,108 @@ except ImportError:
     ARGON2_OK = False
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-APP_DIR    = os.path.join(os.path.expanduser("~"), ".marai")
+# CONFIG_DIR always lives at ~/.marai on the local machine
+CONFIG_DIR  = os.path.join(os.path.expanduser("~"), ".marai")
+os.makedirs(CONFIG_DIR, exist_ok=True)
+
+def _exe_dir():
+    """Return the directory containing the running exe or script."""
+    import sys
+    if getattr(sys, "_MEIPASS", None):
+        # PyInstaller bundle — use the exe's directory
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+def _portable_config_file():
+    """config.json next to the exe — used when running from USB."""
+    return os.path.join(_exe_dir(), "config.json")
+
+def _local_config_file():
+    """config.json in ~/.marai — used for normal installs."""
+    return os.path.join(CONFIG_DIR, "config.json")
+
+def _active_config_file():
+    """
+    Prefer config.json next to the exe (portable/USB mode).
+    Fall back to ~/.marai/config.json for normal installs.
+    Portable config is detected by its presence next to the exe,
+    OR by vault files existing next to the exe.
+    """
+    portable = _portable_config_file()
+    exe_dir  = _exe_dir()
+    # If config.json already exists next to exe, always use it (USB mode)
+    if os.path.exists(portable):
+        return portable
+    # If vault files exist next to exe, auto-create portable config there
+    if (os.path.exists(os.path.join(exe_dir, "vault.enc")) or
+            os.path.exists(os.path.join(exe_dir, "meta.json"))):
+        return portable
+    return _local_config_file()
+
+def _load_config():
+    """Load app config. Returns dict with defaults if file missing."""
+    cfg_file = _active_config_file()
+    defaults = {"vault_dir": os.path.dirname(cfg_file)
+                if cfg_file == _portable_config_file() else CONFIG_DIR}
+    try:
+        if os.path.exists(cfg_file):
+            with open(cfg_file, encoding="utf-8") as f:
+                data = json.load(f)
+            defaults.update(data)
+    except Exception:
+        pass
+    return defaults
+
+def _save_config(data):
+    cfg_file = _active_config_file()
+    try:
+        with open(cfg_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        # If we cannot write next to exe (e.g. read-only), fall back to local
+        try:
+            with open(_local_config_file(), "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+def _get_vault_dir():
+    return _load_config().get("vault_dir", CONFIG_DIR)
+
+def _set_vault_dir(path):
+    cfg = _load_config()
+    cfg["vault_dir"] = path
+    _save_config(cfg)
+    _refresh_paths(path)
+
+def _refresh_paths(vault_dir=None):
+    """Update module-level VAULT_FILE and META_FILE to point at vault_dir."""
+    global APP_DIR, VAULT_FILE, META_FILE
+    APP_DIR    = vault_dir or _get_vault_dir()
+    VAULT_FILE = os.path.join(APP_DIR, "vault.enc")
+    META_FILE  = os.path.join(APP_DIR, "meta.json")
+    os.makedirs(APP_DIR, exist_ok=True)
+
+# Initialise paths from config on startup
+APP_DIR    = CONFIG_DIR
 VAULT_FILE = os.path.join(APP_DIR, "vault.enc")
 META_FILE  = os.path.join(APP_DIR, "meta.json")
-os.makedirs(APP_DIR, exist_ok=True)
+_refresh_paths()
 
 # ── Migrate from VaultKey if needed ───────────────────────────────────────
 def migrate_from_vaultkey():
     old_dir = os.path.join(os.path.expanduser("~"), ".vaultkey")
     if not os.path.exists(old_dir):
         return
-    if os.path.exists(os.path.join(APP_DIR, "meta.json")):
+    if os.path.exists(os.path.join(CONFIG_DIR, "meta.json")):
         return
     import shutil
     try:
         for fname in ["vault.enc", "meta.json"]:
             src = os.path.join(old_dir, fname)
             if os.path.exists(src):
-                shutil.copy2(src, os.path.join(APP_DIR, fname))
-        # Leave a flag so we patch the verify token on next unlock
-        open(os.path.join(APP_DIR, ".needs_token_patch"), "w").close()
+                shutil.copy2(src, os.path.join(CONFIG_DIR, fname))
+        open(os.path.join(CONFIG_DIR, ".needs_token_patch"), "w").close()
     except Exception:
         pass
 
@@ -100,7 +184,7 @@ migrate_from_vaultkey()
 
 def patch_verify_token_if_needed(key):
     """Called after successful unlock to update VAULTKEY_OK -> MARAI_OK."""
-    flag = os.path.join(APP_DIR, ".needs_token_patch")
+    flag = os.path.join(CONFIG_DIR, ".needs_token_patch")
     if not os.path.exists(flag):
         return
     try:
@@ -178,6 +262,9 @@ RED      = "#fc5c7d"
 TEXT     = "#e4e4f0"
 MUTED    = "#6b6b90"
 
+SURFACE3   = "#23233a"   # card hover state
+CARD_BORDER= "#3a3a55"   # card border — slightly lighter than BORDER
+
 FNT_TITLE  = ("Courier New", 22, "bold")
 FNT_HEAD   = ("Segoe UI", 12, "bold")
 FNT_BODY   = ("Segoe UI", 11)
@@ -218,13 +305,40 @@ def _password_age(entry):
 CATEGORIES = list(CAT_COLORS.keys())
 
 # ── Styled Button helper ───────────────────────────────────────────────────
-def mk_btn(parent, text, cmd, bg=ACCENT, fg="white", w=16):
+class Tooltip:
+    """Shows a small dark tooltip popup on hover."""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text   = text
+        self.tip    = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, e=None):
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(tw, text=self.text, font=("Segoe UI", 9),
+                 bg="#2a2a3d", fg=TEXT, relief="flat",
+                 padx=8, pady=4).pack()
+
+    def _hide(self, e=None):
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
+def mk_btn(parent, text, cmd, bg=ACCENT, fg="white", w=16, tooltip=None):
     b = tk.Button(parent, text=text, command=cmd, bg=bg, fg=fg,
                   font=FNT_BTN, relief="flat", cursor="hand2",
                   activebackground=ACCENT, activeforeground="white",
                   padx=14, pady=8, width=w, bd=0)
     b.bind("<Enter>", lambda e: b.config(bg=_lighten(bg)))
     b.bind("<Leave>", lambda e: b.config(bg=bg))
+    if tooltip:
+        Tooltip(b, tooltip)
     return b
 
 def _lighten(hex_color):
@@ -274,6 +388,18 @@ class LockScreen(tk.Frame):
         self._build()
 
     def _build(self):
+        # ── About button — top right corner ──────────────────────────────
+        about_btn = tk.Button(self, text="ℹ  About MARAi",
+                              font=("Segoe UI", 10),
+                              bg=SURFACE2, fg=TEXT,
+                              relief="flat", cursor="hand2", bd=0,
+                              padx=14, pady=8,
+                              command=lambda: VaultApp._show_about_static(
+                                  self.winfo_toplevel()))
+        about_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-16, y=16)
+        about_btn.bind("<Enter>", lambda e: about_btn.config(bg=ACCENT, fg="white"))
+        about_btn.bind("<Leave>", lambda e: about_btn.config(bg=SURFACE2, fg=TEXT))
+
         center = tk.Frame(self, bg=BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -288,8 +414,8 @@ class LockScreen(tk.Frame):
         tk.Label(center, text="M  A  R  A  i",
                  font=("Segoe UI", 26, "bold"),
                  fg=ACCENT, bg=BG).pack()
-        tk.Label(center, text="your offline password vault — hidden by design",
-                 font=FNT_SM, fg=MUTED, bg=BG).pack(pady=(4, 24))
+        tk.Label(center, text="Your offline password vault, hidden by design.",
+                 font=("Segoe UI", 10, "italic"), fg=MUTED, bg=BG).pack(pady=(4, 24))
 
         card = tk.Frame(center, bg=SURFACE, padx=40, pady=32,
                         highlightbackground=BORDER, highlightthickness=1)
@@ -564,7 +690,8 @@ class GeneratorDialog(tk.Toplevel):
     """Standalone password generator — callable from header or entry dialog."""
     def __init__(self, master, on_use=None):
         super().__init__(master)
-        self.on_use = on_use   # callback(password) when Use button clicked
+        self.wm_attributes("-alpha", 0)
+        self.on_use = on_use
         self.title("Password Generator")
         self.configure(bg=SURFACE)
         self.resizable(False, False)
@@ -577,9 +704,11 @@ class GeneratorDialog(tk.Toplevel):
             pass
         w, h = 500, 480
         _centre_on_parent(self, master, w, h)
-        self.after(50, lambda: _apply_dwm_to_widget(self))
         self._build()
         self._generate()
+        self.update()
+        _apply_dwm_to_widget(self)
+        self.wm_attributes("-alpha", 1)
 
     def _build(self):
         pad = tk.Frame(self, bg=SURFACE, padx=30, pady=24)
@@ -718,6 +847,7 @@ class GeneratorDialog(tk.Toplevel):
 class EntryDialog(tk.Toplevel):
     def __init__(self, master, on_save, entry=None):
         super().__init__(master)
+        self.wm_attributes("-alpha", 0)
         self.on_save = on_save
         self.entry   = entry
         self.title("Edit Entry" if entry else "New Entry")
@@ -733,9 +863,10 @@ class EntryDialog(tk.Toplevel):
         w, h = 460, 580
         _centre_on_parent(self, master, w, h)
         self.minsize(420, 460)
-        self.after(150, lambda: _apply_dwm_to_widget(self))
-        self.bind("<Map>", lambda e: self.after(50, lambda: _apply_dwm_to_widget(self)))
         self._build()
+        self.update()
+        _apply_dwm_to_widget(self)
+        self.wm_attributes("-alpha", 1)
 
     def _lbl(self, parent, text, ret=False):
         lbl = tk.Label(parent, text=text, font=FNT_SM, fg=MUTED, bg=SURFACE)
@@ -917,7 +1048,7 @@ class EntryDialog(tk.Toplevel):
         if not n or not u or not p:
             messagebox.showwarning("Missing Fields",
                                    "Name, Username, and Password are required.",
-                                   parent=self)
+                                   parent=self.winfo_toplevel())
             return
         # Stamp updated_at only if password changed (or new entry)
         existing_pw = (self.entry or {}).get("password", "")
@@ -986,10 +1117,6 @@ class VaultApp(tk.Frame):
         hdr.pack(fill="x")
         left = tk.Frame(hdr, bg=SURFACE)
         left.pack(side="left", padx=20)
-        # Small concentric logo in header
-        logo_c = tk.Canvas(left, width=28, height=28, bg=SURFACE, highlightthickness=0)
-        logo_c.pack(side="left", padx=(0,8))
-        _draw_concentric_logo(logo_c, 14, 14, 14, SURFACE)
         tk.Label(left, text="MARAi", font=("Segoe UI",15,"bold"),
                  fg=ACCENT, bg=SURFACE).pack(side="left")
         tk.Label(left, text=f"v{VERSION}", font=("Courier New",9),
@@ -1001,11 +1128,16 @@ class VaultApp(tk.Frame):
         self.lock_timer_lbl = tk.Label(right, text="", font=FNT_SM, fg=MUTED, bg=SURFACE)
         self.lock_timer_lbl.pack(side="left", padx=(0,10))
         self._update_lock_timer_display()
-        mk_btn(right, "+ Add", self._add_entry, w=7).pack(side="left", padx=(0,6))
-        mk_btn(right, "⚙️ Generate", self._open_generator, bg=SURFACE2, fg=MUTED, w=12).pack(side="left", padx=(0,6))
-        mk_btn(right, "🔑 Passwd", self._change_password, bg=SURFACE2, fg=MUTED, w=9).pack(side="left", padx=(0,6))
-        mk_btn(right, "ℹ About", self._show_about, bg=SURFACE2, fg=MUTED, w=8).pack(side="left", padx=(0,6))
-        mk_btn(right, "🔒 Lock", self.on_lock, bg=SURFACE2, fg=MUTED, w=8).pack(side="left")
+        mk_btn(right, "+ Add Entry", self._add_entry, w=12).pack(side="left", padx=(0,8))
+        mk_btn(right, "⚙️ Generate", self._open_generator, bg=SURFACE2, fg=TEXT, w=12).pack(side="left", padx=(0,4))
+        mk_btn(right, "🔑", self._change_password, bg=SURFACE2, fg=MUTED, w=3,
+               tooltip="Change Master Password").pack(side="left", padx=(0,4))
+        mk_btn(right, "📂", self._change_vault_location, bg=SURFACE2, fg=MUTED, w=3,
+               tooltip="Change Vault Location").pack(side="left", padx=(0,4))
+        mk_btn(right, "ℹ", self._show_about, bg=SURFACE2, fg=MUTED, w=3,
+               tooltip="About MARAi").pack(side="left", padx=(0,4))
+        mk_btn(right, "🔒", self.on_lock, bg=SURFACE2, fg=MUTED, w=3,
+               tooltip="Lock Vault").pack(side="left")
 
         # Update banner (hidden until update found)
         self._update_banner = tk.Frame(self, bg="#1a2a10",
@@ -1029,8 +1161,8 @@ class VaultApp(tk.Frame):
                   command=self._dismiss_update_banner).pack(side="right", padx=(0,4))
 
         # Search
-        sf = tk.Frame(self, bg=BG, padx=20, pady=12)
-        sf.pack(fill="x")
+        sf = tk.Frame(self, bg=BG)
+        sf.pack(fill="x", padx=20, pady=(12,6))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._render())
         wrap = tk.Frame(sf, bg=SURFACE2, highlightbackground=BORDER, highlightthickness=1)
@@ -1040,6 +1172,22 @@ class VaultApp(tk.Frame):
         tk.Entry(wrap, textvariable=self.search_var, font=FNT_BODY,
                  bg=SURFACE2, fg=TEXT, insertbackground=TEXT,
                  relief="flat").pack(side="left", fill="x", expand=True, ipady=9)
+
+        # Category filter bar
+        self.active_filter = tk.StringVar(value="All")
+        ff = tk.Frame(self, bg=BG)
+        ff.pack(fill="x", padx=20, pady=(0,10))
+        self._filter_btns = {}
+        for cat in ["All"] + list(CATEGORIES):
+            label = cat if cat == "All" else f"{CAT_EMOJI.get(cat,'')} {cat}"
+            btn = tk.Button(ff, text=label,
+                            font=("Segoe UI", 9),
+                            relief="flat", cursor="hand2",
+                            bd=0, padx=10, pady=4)
+            btn.pack(side="left", padx=(0,4))
+            self._filter_btns[cat] = btn
+            btn.config(command=lambda c=cat: self._set_filter(c))
+        self._update_filter_btns()
 
         # Scrollable area
         outer = tk.Frame(self, bg=BG)
@@ -1059,6 +1207,20 @@ class VaultApp(tk.Frame):
         self.canvas.bind_all("<MouseWheel>",
             lambda e: self.canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
 
+    def _set_filter(self, cat):
+        self.active_filter.set(cat)
+        self._update_filter_btns()
+        self._render()
+
+    def _update_filter_btns(self):
+        active = self.active_filter.get()
+        for cat, btn in self._filter_btns.items():
+            if cat == active:
+                btn.config(bg=ACCENT, fg="white")
+            else:
+                fg_c = CAT_COLORS.get(cat, (MUTED, SURFACE2))[0] if cat != "All" else MUTED
+                btn.config(bg=SURFACE2, fg=fg_c)
+
     def _on_canvas_resize(self, event):
         self.canvas.itemconfig(self._cw, width=event.width)
         if event.width != self._last_canvas_width:
@@ -1072,12 +1234,25 @@ class VaultApp(tk.Frame):
             w.destroy()
         self.pw_visible.clear()
 
-        q = self.search_var.get().lower()
-        filtered = [e for e in self.vault
-                    if q in e.get("name","").lower()
+        q      = self.search_var.get().lower()
+        fcat   = self.active_filter.get()
+
+        def _matches(e):
+            # Category filter
+            if fcat != "All" and e.get("category","Other") != fcat:
+                return False
+            # Search all fields
+            if not q:
+                return True
+            return (q in e.get("name","").lower()
                     or q in e.get("user","").lower()
                     or q in e.get("category","").lower()
-                    or q in e.get("url","").lower()]
+                    or q in e.get("url","").lower()
+                    or q in e.get("host","").lower()
+                    or q in e.get("notes","").lower()
+                    or q in e.get("workspace","").lower())
+
+        filtered = [e for e in self.vault if _matches(e)]
 
         # Favourites always appear first
         filtered.sort(key=lambda e: (not e.get("favourite", False),))
@@ -1092,70 +1267,110 @@ class VaultApp(tk.Frame):
                      fg=MUTED, bg=BG, justify="center").pack(pady=80)
             return
 
-        # Configure columns once
-        self.cards_frame.grid_columnconfigure(0, weight=1, uniform="col")
-        self.cards_frame.grid_columnconfigure(1, weight=1, uniform="col")
+        # Responsive columns — 1 column below 640px, 2 above
+        cw   = self.canvas.winfo_width()
+        cols = 1 if cw < 640 else 2
 
-        num_rows = (len(filtered) + 1) // 2
+        for c in range(2):
+            self.cards_frame.grid_columnconfigure(
+                c, weight=1 if c < cols else 0,
+                uniform="col" if c < cols else "")
+
+        CARD_H   = 220   # consistent card height
+        num_rows = (len(filtered) + cols - 1) // cols
         for r in range(num_rows):
-            self.cards_frame.grid_rowconfigure(r, weight=1)
+            self.cards_frame.grid_rowconfigure(r, weight=0, minsize=CARD_H)
 
         for i, entry in enumerate(filtered):
             real_idx = self.vault.index(entry)
-            row, col = divmod(i, 2)
+            row, col  = divmod(i, cols)
             cell = tk.Frame(self.cards_frame, bg=BG)
-            cell.grid(row=row, column=col, sticky="nsew", padx=12, pady=8)
+            cell.grid(row=row, column=col, sticky="nsew", padx=10, pady=8)
             cell.grid_rowconfigure(0, weight=1)
             cell.grid_columnconfigure(0, weight=1)
             self._make_card(cell, entry, real_idx)
 
-    def _make_card(self, parent, entry, idx):
-        cat = entry.get("category", "Other")
-        fg_c, bg_c = CAT_COLORS.get(cat, (MUTED, SURFACE2))
-        card = tk.Frame(parent, bg=SURFACE,
-                        highlightbackground=ACCENT, highlightthickness=1)
-        card.grid(row=0, column=0, sticky="nsew")
-        tk.Frame(card, bg=ACCENT, height=3).pack(fill="x")
-        inner = tk.Frame(card, bg=SURFACE, padx=16, pady=14)
-        inner.pack(fill="both", expand=True)
+    def _bind_mousewheel(self, widget):
+        pass  # canvas.bind_all in _build_ui already handles this globally
 
+    def _make_card(self, parent, entry, idx):
+        cat      = entry.get("category", "Other")
+        fg_c, bg_c = CAT_COLORS.get(cat, (MUTED, SURFACE2))
+        is_fav   = entry.get("favourite", False)
+
+        # ── Card frame ────────────────────────────────────────────────────
+        card = tk.Frame(parent, bg=SURFACE,
+                        highlightbackground=CARD_BORDER, highlightthickness=1)
+        card.grid(row=0, column=0, sticky="nsew")
+
+        # Hover effect
+        def _on_enter(e, c=card):
+            c.config(highlightbackground=ACCENT)
+        def _on_leave(e, c=card):
+            c.config(highlightbackground=CARD_BORDER)
+        card.bind("<Enter>", _on_enter)
+        card.bind("<Leave>", _on_leave)
+
+        # Left colour accent stripe
+        tk.Frame(card, bg=fg_c, width=4).pack(side="left", fill="y")
+
+        inner = tk.Frame(card, bg=SURFACE, padx=14, pady=12)
+        inner.pack(side="left", fill="both", expand=True)
+
+        # ── Header row ────────────────────────────────────────────────────
         hdr = tk.Frame(inner, bg=SURFACE)
         hdr.pack(fill="x")
-        tk.Label(hdr, text=CAT_EMOJI.get(cat,"📁"), font=("Segoe UI",20),
-                 bg=bg_c, fg=fg_c, padx=8, pady=4).pack(side="left")
+
+        # Emoji badge
+        badge = tk.Label(hdr, text=CAT_EMOJI.get(cat,"📁"),
+                         font=("Segoe UI", 16),
+                         bg=bg_c, fg=fg_c, padx=6, pady=2,
+                         relief="flat")
+        badge.pack(side="left")
+
         info = tk.Frame(hdr, bg=SURFACE)
         info.pack(side="left", padx=(10,0), fill="x", expand=True)
-        tk.Label(info, text=entry.get("name",""), font=FNT_HEAD,
-                 fg=TEXT, bg=SURFACE, anchor="w").pack(anchor="w")
-        tk.Label(info, text=cat, font=FNT_SM, fg=fg_c, bg=SURFACE).pack(anchor="w")
 
+        tk.Label(info, text=entry.get("name",""),
+                 font=FNT_HEAD, fg=TEXT, bg=SURFACE,
+                 anchor="w").pack(anchor="w")
+        tk.Label(info, text=cat,
+                 font=FNT_SM, fg=fg_c, bg=SURFACE).pack(anchor="w")
+
+        # Action buttons
         acts = tk.Frame(hdr, bg=SURFACE)
-        acts.pack(side="right")
+        acts.pack(side="right", padx=(4,0))
 
-        # ── Favourite star button ─────────────────────────────────────────
         is_fav = entry.get("favourite", False)
-        star_lbl = tk.Button(acts,
+        star_btn = tk.Button(acts,
                              text="★" if is_fav else "☆",
-                             font=("Segoe UI", 13),
+                             font=("Segoe UI", 12),
                              bg=SURFACE, fg="#f5c518" if is_fav else MUTED,
-                             relief="flat", cursor="hand2", bd=0, padx=4)
-        star_lbl.pack(side="left", padx=2)
+                             relief="flat", cursor="hand2", bd=0, padx=3)
+        star_btn.pack(side="left")
 
-        def _toggle_fav(i=idx, btn=star_lbl):
+        def _toggle_fav(i=idx, btn=star_btn):
             self.vault[i]["favourite"] = not self.vault[i].get("favourite", False)
             self._save_vault()
             self._render()
+        star_btn.config(command=_toggle_fav)
 
-        star_lbl.config(command=_toggle_fav)
+        edit_btn = tk.Button(acts, text="✏️", font=FNT_SM,
+                             bg=SURFACE, fg=MUTED,
+                             relief="flat", cursor="hand2", bd=0, padx=4,
+                             command=lambda i=idx: self._edit(i))
+        edit_btn.pack(side="left", padx=(2,0))
 
-        tk.Button(acts, text="✏️", font=FNT_SM, bg=SURFACE2, fg=TEXT,
-                  relief="flat", cursor="hand2", bd=0, padx=6,
-                  command=lambda i=idx: self._edit(i)).pack(side="left", padx=2)
-        tk.Button(acts, text="🗑", font=FNT_SM, bg=SURFACE2, fg=RED,
-                  relief="flat", cursor="hand2", bd=0, padx=6,
-                  command=lambda i=idx: self._delete(i)).pack(side="left", padx=2)
+        del_btn = tk.Button(acts, text="🗑", font=FNT_SM,
+                            bg=SURFACE, fg=RED,
+                            relief="flat", cursor="hand2", bd=0, padx=4,
+                            command=lambda i=idx: self._delete(i))
+        del_btn.pack(side="left", padx=(2,0))
 
-        tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", pady=10)
+        # ── Divider ───────────────────────────────────────────────────────
+        tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", pady=(10,8))
+
+        # ── Fields ───────────────────────────────────────────────────────
         self._field(inner, "User", entry.get("user",""),     idx, masked=False)
         self._field(inner, "Pass", entry.get("password",""), idx, masked=True)
 
@@ -1165,10 +1380,10 @@ class VaultApp(tk.Frame):
             workspace = entry.get("workspace","").strip()
             is_avd    = bool(workspace)
             if host:
-                self._field(inner, "Host", f"{host}:{port}" if port != "3389" else host,
+                self._field(inner, "Host",
+                            f"{host}:{port}" if port != "3389" else host,
                             idx, masked=False)
             if is_avd:
-                # Show truncated workspace URL as info
                 ws_display = workspace if len(workspace) <= 48 else workspace[:45] + "..."
                 tk.Label(inner, text=f"☁  AVD  •  {ws_display}",
                          font=FNT_SM, fg="#60d0a0", bg=SURFACE,
@@ -1177,24 +1392,36 @@ class VaultApp(tk.Frame):
             mk_btn(inner, btn_label,
                    lambda i=idx: self._rdp_connect(i),
                    bg="#1a5c3a", fg="#60d0a0", w=22
-                   ).pack(anchor="w", pady=(10,2))
+                   ).pack(anchor="w", pady=(8,2))
         else:
             if entry.get("url"):
-                self._field(inner, "URL", entry["url"], idx, masked=False)
+                url_val = entry["url"]
+                self._field(inner, "URL", url_val, idx, masked=False)
+                # Launch URL button
+                def _open_url(u=url_val):
+                    if not u.startswith(("http://","https://")):
+                        u = "https://" + u
+                    webbrowser.open(u)
+                mk_btn(inner, "🌐  Open URL",
+                       _open_url,
+                       bg=SURFACE2, fg=ACCENT, w=12
+                       ).pack(anchor="w", pady=(4,0))
 
         if entry.get("notes"):
             tk.Label(inner, text=f"📝  {entry['notes']}",
-                     font=FNT_SM, fg=MUTED, bg=SURFACE, anchor="w").pack(anchor="w", pady=(4,0))
+                     font=FNT_SM, fg=MUTED, bg=SURFACE,
+                     anchor="w", wraplength=320).pack(anchor="w", pady=(6,0))
 
-        # ── Password age indicator ────────────────────────────────────────
+        # ── Password age ──────────────────────────────────────────────────
         age_text, age_colour = _password_age(entry)
         tk.Label(inner, text=age_text, font=FNT_SM,
                  fg=age_colour, bg=SURFACE, anchor="w").pack(anchor="w", pady=(6,0))
 
     def _field(self, parent, label, value, idx, masked):
-        row = tk.Frame(parent, bg=SURFACE2)
+        row = tk.Frame(parent, bg=SURFACE2,
+                       highlightbackground=BORDER, highlightthickness=1)
         row.pack(fill="x", pady=2)
-        tk.Label(row, text=label, font=FNT_SM, fg=MUTED,
+        tk.Label(row, text=label, font=("Segoe UI", 8), fg=MUTED,
                  bg=SURFACE2, width=5, anchor="w").pack(side="left", padx=(10,6))
         key = f"{label}_{idx}"
         display = "● ● ● ● ● ●" if masked else value
@@ -1313,6 +1540,7 @@ class VaultApp(tk.Frame):
 
     def _change_password(self):
         win = tk.Toplevel(self.winfo_toplevel())
+        win.wm_attributes("-alpha", 0)
         win.title("Change Master Password")
         win.configure(bg=SURFACE)
         win.resizable(False, False)
@@ -1325,7 +1553,6 @@ class VaultApp(tk.Frame):
             pass
         w, h = 420, 460
         _centre_on_parent(win, self.winfo_toplevel(), w, h)
-        win.after(50, lambda: _apply_dwm_to_widget(win))
 
         pad = tk.Frame(win, bg=SURFACE, padx=30, pady=28)
         pad.pack(fill="both", expand=True)
@@ -1429,27 +1656,38 @@ class VaultApp(tk.Frame):
         btn_row.pack(fill="x", pady=(8, 0))
         mk_btn(btn_row, "Cancel", win.destroy, bg=SURFACE2, fg=MUTED, w=12).pack(side="left")
         mk_btn(btn_row, "Change Password", do_change, w=18).pack(side="right")
+        win.update()
+        _apply_dwm_to_widget(win)
+        win.wm_attributes("-alpha", 1)
 
-    def _show_about(self):
-        win = tk.Toplevel(self.winfo_toplevel())
+    @staticmethod
+    def _show_about_static(root):
+        """Open the About dialog from outside the VaultApp instance (e.g. lock screen)."""
+        # Temporarily create a minimal proxy to call _show_about logic
+        win = tk.Toplevel(root)
+        win.wm_attributes("-alpha", 0)
         win.title("About MARAi")
         win.configure(bg=SURFACE)
         win.resizable(False, False)
         win.grab_set()
         try:
-            _ico = getattr(self.winfo_toplevel(), "_ico_path", None)
+            _ico = getattr(root, "_ico_path", None)
             if _ico:
                 win.iconbitmap(_ico)
         except Exception:
             pass
         w, h = 520, 560
-        _centre_on_parent(win, self.winfo_toplevel(), w, h)
-        win.after(50, lambda: _apply_dwm_to_widget(win))
+        _centre_on_parent(win, root, w, h)
+        VaultApp._build_about_content(win, root)
+        win.update()
+        _apply_dwm_to_widget(win)
+        win.wm_attributes("-alpha", 1)
 
-        # ── Header (fixed, always visible) ───────────────────────────────
+    @staticmethod
+    def _build_about_content(win, root):
+        """Build About dialog content — shared between _show_about and _show_about_static."""
         hdr = tk.Frame(win, bg=SURFACE, padx=30, pady=20)
         hdr.pack(fill="x")
-        # Concentric logo for About dialog
         ac = tk.Canvas(hdr, width=64, height=64, bg=SURFACE, highlightthickness=0)
         ac.pack()
         _draw_concentric_logo(ac, 32, 32, 32, SURFACE)
@@ -1460,7 +1698,6 @@ class VaultApp(tk.Frame):
 
         tk.Frame(win, bg=BORDER, height=1).pack(fill="x", padx=30, pady=(12,0))
 
-        # ── Scrollable changelog ──────────────────────────────────────────
         tk.Label(win, text="What's New", font=("Segoe UI",10,"bold"),
                  fg=TEXT, bg=SURFACE).pack(anchor="w", padx=30, pady=(10,4))
 
@@ -1468,18 +1705,14 @@ class VaultApp(tk.Frame):
         scroll_frame.pack(fill="x", padx=30)
         scroll_frame.pack_propagate(False)
 
-        canvas = tk.Canvas(scroll_frame, bg=SURFACE, highlightthickness=0)
-        scrollbar = mk_scrollbar(scroll_frame, orient="vertical",
-                                  command=canvas.yview)
-        inner = tk.Frame(canvas, bg=SURFACE)
-
-        inner.bind("<Configure>",
-                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        cv = tk.Canvas(scroll_frame, bg=SURFACE, highlightthickness=0)
+        sb = mk_scrollbar(scroll_frame, orient="vertical", command=cv.yview)
+        inner = tk.Frame(cv, bg=SURFACE)
+        inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.create_window((0, 0), window=inner, anchor="nw")
+        cv.configure(yscrollcommand=sb.set)
+        cv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
 
         for ver, note in CHANGELOG:
             row = tk.Frame(inner, bg=SURFACE)
@@ -1493,25 +1726,94 @@ class VaultApp(tk.Frame):
                      bg=SURFACE, anchor="w", wraplength=340,
                      justify="left").pack(side="left", padx=(10,0), fill="x")
 
-        # ── Footer (fixed, always visible) ───────────────────────────────
         tk.Frame(win, bg=BORDER, height=1).pack(fill="x", padx=30, pady=(12,0))
-
         ftr = tk.Frame(win, bg=SURFACE, padx=30, pady=14)
         ftr.pack(fill="x")
-
         tk.Label(ftr, text="Your data is stored in  ~/.marai/  on your machine.",
                  font=FNT_SM, fg=MUTED, bg=SURFACE).pack()
-
-        # Clickable GitHub link
         gh_url = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}"
         gh_lbl = tk.Label(ftr, text=gh_url, font=FNT_SM,
-                          fg=ACCENT, bg=SURFACE, cursor="hand2")
+                           fg=ACCENT, bg=SURFACE, cursor="hand2")
         gh_lbl.pack(pady=(6,0))
         gh_lbl.bind("<Button-1>", lambda e: webbrowser.open(gh_url))
-        gh_lbl.bind("<Enter>", lambda e: gh_lbl.config(fg=GREEN))
-        gh_lbl.bind("<Leave>", lambda e: gh_lbl.config(fg=ACCENT))
+        gh_lbl.bind("<Enter>",    lambda e: gh_lbl.config(fg=GREEN))
+        gh_lbl.bind("<Leave>",    lambda e: gh_lbl.config(fg=ACCENT))
+        mk_btn(ftr, "Close", lambda: [win.grab_release(), win.destroy()],
+               bg=SURFACE2, fg=MUTED, w=10).pack(pady=(14,0))
 
-        mk_btn(ftr, "Close", lambda: [win.grab_release(), win.destroy()], bg=SURFACE2, fg=MUTED, w=10).pack(pady=(14,0))
+    def _show_about(self):
+        win = tk.Toplevel(self.winfo_toplevel())
+        win.wm_attributes("-alpha", 0)
+        win.title("About MARAi")
+        win.configure(bg=SURFACE)
+        win.resizable(False, False)
+        win.grab_set()
+        try:
+            _ico = getattr(self.winfo_toplevel(), "_ico_path", None)
+            if _ico:
+                win.iconbitmap(_ico)
+        except Exception:
+            pass
+        w, h = 520, 560
+        _centre_on_parent(win, self.winfo_toplevel(), w, h)
+        VaultApp._build_about_content(win, self.winfo_toplevel())
+        win.update()
+        _apply_dwm_to_widget(win)
+        win.wm_attributes("-alpha", 1)
+
+    def _change_vault_location(self):
+        """Let user pick a new folder for vault.enc and meta.json."""
+        from tkinter import filedialog
+        current = _get_vault_dir()
+        new_dir = filedialog.askdirectory(
+            title="Choose Vault Folder",
+            initialdir=current,
+            parent=self.winfo_toplevel()
+        )
+        if not new_dir:
+            return
+
+        import shutil
+        new_vault = os.path.join(new_dir, "vault.enc")
+        new_meta  = os.path.join(new_dir, "meta.json")
+
+        # Check if vault already exists there
+        if os.path.exists(new_vault) or os.path.exists(new_meta):
+            answer = messagebox.askyesno(
+                "Vault Exists",
+                f"A vault already exists in:\n{new_dir}\n\n"
+                "Do you want to switch to it? Your current vault will stay where it is.",
+                parent=self.winfo_toplevel()
+            )
+            if not answer:
+                return
+        else:
+            # Ask if they want to move or just point there
+            answer = messagebox.askyesno(
+                "Move Vault Files",
+                f"Copy your vault files to:\n{new_dir}\n\n"
+                "Your original files will remain in their current location as a backup.",
+                parent=self.winfo_toplevel()
+            )
+            if not answer:
+                return
+            try:
+                os.makedirs(new_dir, exist_ok=True)
+                shutil.copy2(VAULT_FILE, new_vault)
+                shutil.copy2(META_FILE,  new_meta)
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not copy vault files:\n{e}",
+                                     parent=self.winfo_toplevel())
+                return
+
+        # Update config and reload
+        _set_vault_dir(new_dir)
+        messagebox.showinfo(
+            "Vault Location Updated",
+            f"MARAi will now use the vault in:\n{new_dir}\n\n"
+            "Restart MARAi to apply the change.",
+            parent=self.winfo_toplevel()
+        )
 
     def _add_entry(self):
         def on_save(r):
@@ -1683,9 +1985,8 @@ def _centre_on_parent(win, parent, w, h):
 
 def _apply_dwm_to_widget(widget):
     """
-    Gets the real Win32 HWND that owns the title bar and applies dark DWM styling.
-    Uses GetAncestor(GA_ROOT=2) to walk from the inner tkinter frame handle
-    up to the actual top-level window handle that has the caption bar.
+    Apply dark DWM title bar. Must be called after the window is mapped.
+    Uses alpha=0 trick: hide briefly so DWM can apply without showing white flash.
     """
     try:
         import ctypes
@@ -1747,14 +2048,19 @@ class App(tk.Tk):
         super().__init__()
         self.title("MARAi")
         self.configure(bg=BG)
-        w, h = 920, 660
+        self.wm_attributes("-alpha", 0)   # hide until DWM is applied
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w = max(1000, min(int(sw * 0.75), 1400))
+        h = max(640,  min(int(w  * 0.6),  sh - 80))
         self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        self.resizable(True, True)
         self.minsize(820, 520)
         self._set_icon()
-        # Apply dark title bar after window is fully created
-        self.after(50, self._apply_theme)
         self._show_lock()
+        # Force window to be fully created before DWM call
+        self.update()
+        _apply_dwm_to_widget(self)
+        self.wm_attributes("-alpha", 1)   # show with dark title bar already applied
 
     def _apply_theme(self):
         _apply_dwm_to_widget(self)
@@ -1768,20 +2074,22 @@ class App(tk.Tk):
                 self.iconbitmap(ico)
             except Exception:
                 pass
-        # Store path for dialogs to use
         self._ico_path = ico if os.path.exists(ico) else None
 
     def _clear(self):
         for w in self.winfo_children():
             w.destroy()
-
-    def _show_lock(self):
-        self._clear()
-        LockScreen(self, on_unlock=self._show_vault)
+        self.configure(bg=BG)
 
     def _show_vault(self, key):
         self._clear()
         VaultApp(self, key=key, on_lock=self._show_lock)
+        self.after(30, self._apply_theme)
+
+    def _show_lock(self):
+        self._clear()
+        LockScreen(self, on_unlock=self._show_vault)
+        self.after(30, self._apply_theme)
 
 
 if __name__ == "__main__":

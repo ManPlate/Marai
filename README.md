@@ -11,7 +11,7 @@ Sacred knowledge concealed from the world, accessible only to those who hold the
 
 ---
 
-[![Version](https://img.shields.io/badge/version-2.4.0-7c5cfc?style=flat-square)](https://github.com/ManPlate/Marai/releases)
+[![Version](https://img.shields.io/badge/version-2.4.1-7c5cfc?style=flat-square)](https://github.com/ManPlate/Marai/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows)](https://github.com/ManPlate/Marai/releases)
 [![License](https://img.shields.io/badge/license-MIT-4ecca3?style=flat-square)](LICENSE)
 [![Encryption](https://img.shields.io/badge/encryption-AES--256--GCM-fc5c7d?style=flat-square)](#security)
@@ -131,7 +131,8 @@ Meta:         ~/.marai/meta.json  (salt + verification token — no plaintext)
 <!-- VERSION_TABLE_START -->
 | Version | What's New |
 |---|---|
-| **v2.4.0** ← current | Category filters, URL launch, search all fields, custom vault folder |
+| **v2.4.1** ← current | Portable USB mode — zero setup on any machine |
+| **v2.4.0** | Category filters, URL launch, search all fields, custom vault folder |
 | **v2.3.0** | Server category with RDP and Azure Virtual Desktop launch |
 | **v2.2.0** | Favourite entries and password age indicator |
 | **v2.1.0** | Upgraded to Argon2id key derivation — silent migration on login |
@@ -188,34 +189,43 @@ C:\Users\YourName\.marai\meta.json   ← salt and verification token
 
 ---
 
-### How to use Marai as a portable vault on a USB drive
+### How to use MARAi as a portable vault on a USB drive
 
-You can carry your entire vault on a USB drive and use it on any Windows machine — no installation, no setup, just plug in and unlock.
+You can carry your entire vault on a USB drive and use it on any Windows machine — no installation, no per-machine setup required. MARAi automatically detects when it is running from a USB drive and stores everything there.
 
 **Step 1 — Set up your USB drive**
 
 Create a folder on your USB drive, for example `E:\Marai\`. Copy `Marai.exe` into that folder.
 
-**Step 2 — Point MARAi at your USB vault folder**
+**Step 2 — First time setup**
 
-1. Launch `Marai.exe` from the USB drive
-2. Unlock your vault with your master password
+1. Launch `Marai.exe` directly from the USB drive
+2. Create your vault or unlock an existing one
 3. Click the 📂 button in the toolbar
-4. Select the folder on your USB drive (e.g. `E:\Marai\`)
-5. MARAi will copy your vault files there and confirm
+4. Select the same USB folder (e.g. `E:\Marai\`)
+5. MARAi copies your vault files there and saves a `config.json` next to the exe
 
-From now on MARAi will read and write your vault directly from the USB drive.
+That is it. Your USB drive now contains everything:
 
-**Step 3 — Using it on another machine**
+```
+E:\Marai├── Marai.exe       ← the app
+├── config.json     ← remembers the vault location
+├── vault.enc       ← your encrypted passwords
+└── meta.json       ← salt and verification token
+```
+
+**Step 3 — Using it on any other machine**
 
 1. Plug in your USB drive
 2. Open `Marai.exe` directly from the USB drive
-3. On first run it will use the default vault location — click 📂 and point it to your USB folder
+3. MARAi reads `config.json` from the same folder — no pointing or setup needed
 4. Unlock with your master password — all your passwords are there
 
-> **Tip:** Keep a copy of `vault.enc` and `meta.json` backed up separately as well. A USB drive can be lost or damaged. Your master password is the only thing that can decrypt them, so keep that safe too.
+> **Why it works automatically:** MARAi checks for `config.json` next to the exe before looking anywhere else. Since the config file travels with the exe on the USB drive, every machine gets the same vault location automatically.
 
-> **Note on other operating systems:** The `.exe` runs on Windows only. Mac and Linux users can run `marai.py` directly from source — see [README_DEV.md](README_DEV.md) for instructions. The vault files (`vault.enc` and `meta.json`) are cross-platform and will open on any OS.
+> **Tip:** Keep a backup copy of `vault.enc` and `meta.json` in a separate safe location. USB drives can be lost or damaged — your master password is the only thing that can decrypt them.
+
+> **Note on other operating systems:** `Marai.exe` runs on Windows only. Mac and Linux users can run `marai.py` from source — see [README_DEV.md](README_DEV.md). The vault files are cross-platform and will open on any OS.
 
 ---
 
