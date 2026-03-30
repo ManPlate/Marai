@@ -131,7 +131,8 @@ Meta:         ~/.marai/meta.json  (salt + verification token — no plaintext)
 <!-- VERSION_TABLE_START -->
 | Version | What's New |
 |---|---|
-| **v2.3.0** ← current | Server category with RDP and Azure Virtual Desktop launch |
+| **v2.4.0** ← current | Category filters, URL launch, search all fields, custom vault folder |
+| **v2.3.0** | RDP session launch from Server entries |
 | **v2.2.0** | Favourite entries and password age indicator |
 | **v2.1.0** | Upgraded to Argon2id key derivation — silent migration on login |
 | **v2.0.0** | Rebranded from VaultKey to Marai |

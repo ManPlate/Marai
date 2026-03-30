@@ -1,6 +1,3 @@
 {
-  "version": "2.3.0",
-  "release_date": "2025-03-26",
-  "download_url": "https://github.com/ManPlate/Marai/releases/tag/v2.3.0",
-  "release_notes": "Server category with RDP and Azure Virtual Desktop launch"
+  "version": "2.4.0"
 }
