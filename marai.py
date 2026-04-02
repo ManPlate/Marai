@@ -9,8 +9,9 @@ from tkinter import messagebox, ttk
 import json, os, base64, secrets, string, threading, urllib.request, webbrowser, subprocess, ctypes, sys, datetime
 
 # ── Version ────────────────────────────────────────────────────────────────
-VERSION = "2.4.1"
+VERSION = "2.4.2"
 CHANGELOG = [
+    ("2.4.2", "Auto-copy password when launching URL or RDP session"),
     ("2.4.1", "Portable USB mode — zero setup on any machine"),
     ("2.4.0", "Category filters, URL launch, search all fields, custom vault folder"),
     ("2.3.0", "RDP session launch from Server entries"),
@@ -400,6 +401,33 @@ class LockScreen(tk.Frame):
         about_btn.bind("<Enter>", lambda e: about_btn.config(bg=ACCENT, fg="white"))
         about_btn.bind("<Leave>", lambda e: about_btn.config(bg=SURFACE2, fg=TEXT))
 
+        # ── Vault location button — bottom left corner ────────────────────
+        def _change_location():
+            from tkinter import filedialog
+            new_dir = filedialog.askdirectory(
+                title="Choose Vault Folder",
+                initialdir=_get_vault_dir(),
+                parent=self.winfo_toplevel()
+            )
+            if not new_dir:
+                return
+            _set_vault_dir(new_dir)
+            _refresh_paths(new_dir)
+            # Rebuild lock screen via App so the window stays intact
+            app = self.winfo_toplevel()
+            if hasattr(app, "_show_lock"):
+                app._show_lock()
+
+        loc_btn = tk.Button(self, text="📂  Vault Location",
+                            font=("Segoe UI", 9),
+                            bg=SURFACE2, fg=MUTED,
+                            relief="flat", cursor="hand2", bd=0,
+                            padx=12, pady=6,
+                            command=_change_location)
+        loc_btn.place(relx=0.0, rely=1.0, anchor="sw", x=16, y=-16)
+        loc_btn.bind("<Enter>", lambda e: loc_btn.config(fg=TEXT))
+        loc_btn.bind("<Leave>", lambda e: loc_btn.config(fg=MUTED))
+
         center = tk.Frame(self, bg=BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -534,9 +562,44 @@ class LockScreen(tk.Frame):
             self._pw_entry.focus_set()
 
     def _build_setup(self, card):
-        tk.Label(card, text="Welcome! Create your master password.",
-                 font=FNT_BODY, fg=TEXT, bg=SURFACE).pack(pady=(0,18))
+        tk.Label(card, text="Welcome! Set up your vault.",
+                 font=FNT_BODY, fg=TEXT, bg=SURFACE).pack(pady=(0,16))
 
+        # ── Vault location picker ─────────────────────────────────────────
+        loc_frame = tk.Frame(card, bg=SURFACE)
+        loc_frame.pack(fill="x", pady=(0,14))
+        tk.Label(loc_frame, text="VAULT LOCATION", font=FNT_SM,
+                 fg=MUTED, bg=SURFACE).pack(anchor="w")
+        loc_row = tk.Frame(loc_frame, bg=SURFACE)
+        loc_row.pack(fill="x", pady=(4,0))
+        self._loc_var = tk.StringVar(value=_get_vault_dir())
+        loc_lbl = tk.Label(loc_row, textvariable=self._loc_var,
+                           font=("Segoe UI", 8), fg=MUTED, bg=SURFACE2,
+                           anchor="w", padx=8, pady=6)
+        loc_lbl.pack(side="left", fill="x", expand=True)
+
+        def _pick_location():
+            from tkinter import filedialog
+            new_dir = filedialog.askdirectory(
+                title="Choose where to store your vault",
+                initialdir=_get_vault_dir(),
+                parent=self.winfo_toplevel()
+            )
+            if new_dir:
+                _set_vault_dir(new_dir)
+                _refresh_paths(new_dir)
+                self._loc_var.set(new_dir)
+
+        mk_btn(loc_row, "📂 Browse", _pick_location,
+               bg=SURFACE2, fg=TEXT, w=10).pack(side="left", padx=(6,0))
+        tk.Label(loc_frame,
+                 text="Default saves to your user folder. Change to a USB drive for portable use.",
+                 font=("Segoe UI", 8), fg=MUTED, bg=SURFACE,
+                 wraplength=300, justify="left").pack(anchor="w", pady=(4,0))
+
+        tk.Frame(card, bg=BORDER, height=1).pack(fill="x", pady=(0,14))
+
+        # ── Master password ───────────────────────────────────────────────
         tk.Label(card, text="MASTER PASSWORD", font=FNT_SM,
                  fg=MUTED, bg=SURFACE).pack(anchor="w")
         self.pw_var = tk.StringVar()
@@ -1398,14 +1461,25 @@ class VaultApp(tk.Frame):
                 url_val = entry["url"]
                 self._field(inner, "URL", url_val, idx, masked=False)
                 # Launch URL button
-                def _open_url(u=url_val):
+                pw_val = entry.get("password","")
+                def _open_url(u=url_val, pw=pw_val):
                     if not u.startswith(("http://","https://")):
                         u = "https://" + u
+                    self._copy_secure(pw)
                     webbrowser.open(u)
-                mk_btn(inner, "🌐  Open URL",
-                       _open_url,
-                       bg=SURFACE2, fg=ACCENT, w=12
-                       ).pack(anchor="w", pady=(4,0))
+                url_btn = mk_btn(inner, "🌐  Open URL",
+                                 _open_url, bg=SURFACE2, fg=ACCENT, w=14)
+                url_btn.pack(anchor="w", pady=(4,0))
+                # Show "Copied!" feedback on the button briefly
+                orig_cmd = url_btn.cget("command")
+                def _open_url_with_feedback(b=url_btn, u=url_val, pw=pw_val):
+                    if not u.startswith(("http://","https://")):
+                        u = "https://" + u
+                    self._copy_secure(pw)
+                    webbrowser.open(u)
+                    b.config(text="✓  Password Copied", fg=GREEN)
+                    self.after(2000, lambda: b.config(text="🌐  Open URL", fg=ACCENT))
+                url_btn.config(command=_open_url_with_feedback)
 
         if entry.get("notes"):
             tk.Label(inner, text=f"📝  {entry['notes']}",
@@ -1806,14 +1880,16 @@ class VaultApp(tk.Frame):
                                      parent=self.winfo_toplevel())
                 return
 
-        # Update config and reload
+        # Update config and restart app to load from new location
         _set_vault_dir(new_dir)
-        messagebox.showinfo(
+        answer = messagebox.askyesno(
             "Vault Location Updated",
-            f"MARAi will now use the vault in:\n{new_dir}\n\n"
-            "Restart MARAi to apply the change.",
+            f"Vault location set to:\n{new_dir}\n\n"
+            "MARAi needs to restart to use the new location. Restart now?",
             parent=self.winfo_toplevel()
         )
+        if answer:
+            _restart_app()
 
     def _add_entry(self):
         def on_save(r):
@@ -1834,6 +1910,9 @@ class VaultApp(tk.Frame):
                                    "No host address or workspace URL stored for this entry.",
                                    parent=self.winfo_toplevel())
             return
+
+        # Copy password to clipboard before launching so it is ready to paste
+        self._copy_secure(password)
 
         ok, err = _launch_rdp(host, port, username, password, workspace)
         if not ok:
@@ -1967,6 +2046,21 @@ def _launch_rdp(host, port, username, password, workspace=""):
             return False, str(e)
 
 
+def _restart_app():
+    """Restart the application process — works for both .py and .exe."""
+    import sys, os
+    try:
+        if getattr(sys, "frozen", False):
+            # Running as PyInstaller exe
+            os.execv(sys.executable, [sys.executable])
+        else:
+            # Running as .py script
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception:
+        # execv not available (some platforms) — just quit and let user relaunch
+        sys.exit(0)
+
+
 def _centre_on_parent(win, parent, w, h):
     """Centre a dialog over its parent window — works on any monitor."""
     try:
@@ -2075,6 +2169,15 @@ class App(tk.Tk):
             except Exception:
                 pass
         self._ico_path = ico if os.path.exists(ico) else None
+
+        # Set AppUserModelID so Windows taskbar uses the correct ICO
+        # without this, the taskbar icon is taken from the exe header only
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "ManPlate.MARAi.PasswordManager")
+        except Exception:
+            pass
 
     def _clear(self):
         for w in self.winfo_children():

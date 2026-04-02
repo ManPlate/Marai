@@ -1,6 +1,6 @@
 {
-  "version": "2.4.1",
-  "release_date": "2026-03-28",
-  "download_url": "https://github.com/ManPlate/Marai/releases/tag/v2.4.1",
-  "release_notes": "Portable USB mode \u2014 zero setup on any machine"
+  "version": "2.4.2",
+  "release_date": "2026-04-03",
+  "download_url": "https://github.com/ManPlate/Marai/releases/tag/v2.4.2",
+  "release_notes": "Auto-copy password when launching URL or RDP session"
 }
