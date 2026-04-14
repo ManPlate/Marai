@@ -131,11 +131,14 @@ Meta:         ~/.marai/meta.json  (salt + verification token — no plaintext)
 <!-- VERSION_TABLE_START -->
 | Version | What's New |
 |---|---|
-| **v2.4.1** ← current | Portable USB mode — zero setup on any machine |
+| **v3.0.0** | Work/Personal vault categories, Light/Dark theme, view modes, Import & Export |
+| **v2.5.0** | Secure Notes - store crypto passphrases, recovery codes and any sensitive text |
+| **v2.4.2** | Auto-copy password when launching URL or RDP session |
+| **v2.4.1** | Portable USB mode - zero setup on any machine |
 | **v2.4.0** | Category filters, URL launch, search all fields, custom vault folder |
-| **v2.3.0** | Server category with RDP and Azure Virtual Desktop launch |
+| **v2.3.0** | RDP session launch from Server entries |
 | **v2.2.0** | Favourite entries and password age indicator |
-| **v2.1.0** | Upgraded to Argon2id key derivation — silent migration on login |
+| **v2.1.0** | Upgraded to Argon2id key derivation - silent migration on login |
 | **v2.0.0** | Rebranded from VaultKey to Marai |
 | **v1.7.0** | Passwords never enter Windows clipboard history (Win+V) |
 | **v1.6.0** | Added automatic update checker |
@@ -145,6 +148,7 @@ Meta:         ~/.marai/meta.json  (salt + verification token — no plaintext)
 | **v1.2.0** | Fixed card layout and resize behaviour |
 | **v1.1.0** | Fixed compatibility with Python 3.14 on Windows |
 | **v1.0.0** | Initial release |
+| **v1.0** | end-1c |
 <!-- VERSION_TABLE_END -->
 
 ---
