@@ -1,3 +1,6 @@
 {
-  "version": "4.0.0"
+  "version": "4.1.0",
+  "release_date": "2026-05-06",
+  "download_url": "https://github.com/ManPlate/Marai/releases/tag/v4.1.0",
+  "changelog": "DPI awareness, custom ttk theme, auto-breach check, unified column chooser, clipboard countdown, backup reminders, dialog polish, card health indicators"
 }

@@ -5,15 +5,31 @@ Requires: pip install cryptography pyperclip Pillow
 Optional: pip install argon2-cffi (stronger key derivation)
 """
 
+# Windows DPI awareness — MUST be set before importing tkinter
+import sys
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except: pass
+
 import tkinter as tk
 from tkinter import messagebox, ttk
 import json, os, base64, secrets, string, threading, urllib.request
+_CONFIG_LOCK = threading.RLock()  # protects config file read/write across threads
 import webbrowser, subprocess, ctypes, sys, datetime, csv, io, shutil
 import time as _time
 
 # == Version ================================================================
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 CHANGELOG = [
+    ("4.1.0", "Windows DPI awareness, custom ttk dark theme, entry focus effects, "
+              "FindWindowW DWM for all dialogs, alpha-transparent dialog positioning, "
+              "unified column chooser, health filter, dashboard filter, auto-breach check, "
+              "backup reminders, clipboard countdown toast, card tint for all issues"),
     ("4.0.0", "Vault Health Dashboard with breach detection (HIBP), "
               "weak/reused/old password audit, live shield indicator, "
               "custom fields, smart brand matching, per-vault themes, "
@@ -152,6 +168,9 @@ _BRAND_DOMAINS = {
     "salesforce": "salesforce.com", "hubspot": "hubspot.com", "zendesk": "zendesk.com",
     "shopify": "shopify.com", "wordpress": "wordpress.com",
     "servicenow": "servicenow.com", "oracle": "oracle.com", "sap": "sap.com",
+    "bescom": "bescom.co.in", "kaveri": "kaveri.karnataka.gov.in",
+    "kaveri online": "kaveri.karnataka.gov.in", "bwssb": "bwssb.gov.in",
+    "bbmp": "bbmp.gov.in", "irctc": "irctc.co.in",
     "vmware": "vmware.com", "cisco": "cisco.com", "webex": "webex.com",
     "cisco webex": "webex.com", "fortinet": "fortinet.com",
     "palo alto": "paloaltonetworks.com", "crowdstrike": "crowdstrike.com",
@@ -189,7 +208,6 @@ _BRAND_DOMAINS = {
     # Insurance & Gov
     "lic": "licindia.in", "policybazaar": "policybazaar.com",
     "aadhaar": "uidai.gov.in", "digilocker": "digilocker.gov.in",
-    "irctc": "irctc.co.in",
 }
 
 def _domain_from_url(url):
@@ -543,7 +561,8 @@ def _active_config_file():
     return _local_config_file()
 
 def _load_config():
-    cfg_file = _active_config_file()
+    with _CONFIG_LOCK:
+        cfg_file = _active_config_file()
     defaults = {"vault_dir": os.path.dirname(cfg_file)
                 if cfg_file == _portable_config_file() else CONFIG_DIR}
     try:
@@ -555,15 +574,16 @@ def _load_config():
     return defaults
 
 def _save_config(data):
-    cfg_file = _active_config_file()
-    try:
-        with open(cfg_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
+    with _CONFIG_LOCK:
+        cfg_file = _active_config_file()
         try:
-            with open(_local_config_file(), "w", encoding="utf-8") as f:
+            with open(cfg_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-        except Exception: pass
+        except Exception:
+            try:
+                with open(_local_config_file(), "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+            except Exception: pass
 
 def _get_vault_dir():
     return _load_config().get("vault_dir", CONFIG_DIR)
@@ -588,6 +608,27 @@ def _get_zoom_level():
 def _save_zoom_level(z):
     cfg = _load_config(); cfg["zoom"] = z; _save_config(cfg)
 
+def _check_backup_reminder():
+    """Show backup reminder if vault changed and no backup in 7 days."""
+    cfg = _load_config()
+    last = cfg.get("last_backup", "")
+    if not last: return True  # never backed up
+    try:
+        d = datetime.datetime.fromisoformat(last)
+        return (datetime.datetime.now() - d).days >= 7
+    except: return True
+
+def _save_backup_date():
+    cfg = _load_config()
+    cfg["last_backup"] = datetime.datetime.now().isoformat(timespec="seconds")
+    _save_config(cfg)
+
+def _get_auto_breach_check():
+    return _load_config().get("auto_breach_check", False)
+
+def _set_auto_breach_check(val):
+    cfg = _load_config(); cfg["auto_breach_check"] = bool(val); _save_config(cfg)
+
 def _get_last_health_check():
     """Get last health check date as ISO string or empty."""
     return _load_config().get("last_health_check", "")
@@ -607,15 +648,33 @@ def _health_check_stale():
         return (datetime.datetime.now() - last).days >= 10
     except: return True
 
+# Breached password hashes — standalone file, no config dependency
+_BREACHED_HASHES = set()
+_BREACHED_FILE = os.path.join(os.path.expanduser("~"), ".marai", "breached.txt")
+
 def _get_breached_hashes():
-    """Get set of SHA-1 password hashes known to be breached."""
-    return set(_load_config().get("breached_hashes", []))
+    """Load breached hashes from memory or file."""
+    global _BREACHED_HASHES
+    if not _BREACHED_HASHES:
+        try:
+            if os.path.exists(_BREACHED_FILE):
+                with open(_BREACHED_FILE, "r") as f:
+                    for line in f:
+                        h = line.strip()
+                        if h: _BREACHED_HASHES.add(h)
+        except: pass
+    return _BREACHED_HASHES  # return the actual set, not a copy
 
 def _save_breached_hashes(hashes):
-    """Save set of breached password hashes."""
-    cfg = _load_config()
-    cfg["breached_hashes"] = list(hashes)
-    _save_config(cfg)
+    """Save breached hashes to standalone text file."""
+    global _BREACHED_HASHES
+    _BREACHED_HASHES = set(hashes)
+    try:
+        os.makedirs(os.path.dirname(_BREACHED_FILE), exist_ok=True)
+        with open(_BREACHED_FILE, "w") as f:
+            for h in hashes:
+                f.write(h + "\n")
+    except: pass
 
 def _is_password_breached(password):
     """Check if a password's hash is in the stored breached set."""
@@ -836,7 +895,7 @@ def _save_theme(name):
     cfg = _load_config(); cfg["theme"] = name; _save_config(cfg)
 
 def _get_saved_view_mode():
-    return _load_config().get("view_mode", "small")
+    return _load_config().get("view_mode", "grid")
 
 def _save_view_mode(mode):
     cfg = _load_config(); cfg["view_mode"] = mode; _save_config(cfg)
@@ -857,6 +916,21 @@ CARD_BORDER = CARD_BORDER if "CARD_BORDER" in dir() else "#33335a"
 ACCENT = ACCENT if "ACCENT" in dir() else "#7c5cfc"
 GREEN = GREEN if "GREEN" in dir() else "#4ecca3"
 RED = RED if "RED" in dir() else "#fc5c7d"
+
+def _card_surface(hover=False):
+    """Return card background color with subtle depth."""
+    return SURFACE3 if hover else SURFACE
+
+def _tint_surface(issue_color, amount=0.15):
+    """Mix issue_color into SURFACE to create a subtle tinted background."""
+    try:
+        sr,sg,sb = int(SURFACE[1:3],16), int(SURFACE[3:5],16), int(SURFACE[5:7],16)
+        ir,ig,ib = int(issue_color[1:3],16), int(issue_color[3:5],16), int(issue_color[5:7],16)
+        r = int(sr*(1-amount) + ir*amount)
+        g = int(sg*(1-amount) + ig*amount)
+        b = int(sb*(1-amount) + ib*amount)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except: return SURFACE
 TEXT = TEXT if "TEXT" in dir() else "#e8e8f4"
 MUTED = MUTED if "MUTED" in dir() else "#6e6e96"
 TITLEBAR_BG = TITLEBAR_BG if "TITLEBAR_BG" in dir() else "#08080e"
@@ -869,6 +943,61 @@ FNT_BODY   = ("Segoe UI", 11)
 FNT_MONO   = ("Consolas", 11)
 FNT_SM     = ("Segoe UI", 9)
 FNT_BTN    = ("Segoe UI", 10, "bold")
+FNT_CARD_TITLE = ("Segoe UI", 11, "bold")
+FNT_CARD_SUB   = ("Segoe UI", 9)
+
+def _setup_ttk_theme():
+    """Configure a modern dark ttk theme for all widgets."""
+    style = ttk.Style()
+    style.theme_use("clam")
+    # Global defaults
+    style.configure(".", background=BG, foreground=TEXT, borderwidth=0,
+                    focuscolor=ACCENT, font=FNT_BODY)
+    # Flat modern buttons
+    style.configure("TButton", background=ACCENT, foreground="white",
+                    padding=(16, 8), font=FNT_BTN, relief="flat", borderwidth=0)
+    style.map("TButton",
+              background=[("active", _lighten(ACCENT)), ("pressed", ACCENT),
+                          ("disabled", SURFACE2)],
+              foreground=[("disabled", MUTED)])
+    # Secondary buttons
+    style.configure("Secondary.TButton", background=SURFACE2, foreground=TEXT)
+    style.map("Secondary.TButton",
+              background=[("active", SURFACE3), ("pressed", SURFACE2)])
+    # Danger buttons
+    style.configure("Danger.TButton", background=RED, foreground="white")
+    style.map("Danger.TButton",
+              background=[("active", _lighten(RED)), ("pressed", RED)])
+    # Success buttons
+    style.configure("Success.TButton", background=GREEN, foreground="white")
+    style.map("Success.TButton",
+              background=[("active", _lighten(GREEN)), ("pressed", GREEN)])
+    # Entry fields
+    style.configure("TEntry", fieldbackground=SURFACE2, foreground=TEXT,
+                    insertcolor=TEXT, borderwidth=1, padding=(10, 8))
+    style.map("TEntry",
+              bordercolor=[("focus", ACCENT), ("!focus", BORDER)],
+              fieldbackground=[("focus", SURFACE3), ("!focus", SURFACE2)])
+    # Large entry (for lock screen)
+    style.configure("Large.TEntry", font=("Segoe UI", 14), padding=(14, 12))
+    # Scrollbar
+    style.configure("TScrollbar", background=SURFACE2, troughcolor=BG,
+                    bordercolor=BG, arrowcolor=MUTED, width=8,
+                    darkcolor=SURFACE2, lightcolor=SURFACE2)
+    style.map("TScrollbar", background=[("active", ACCENT)])
+    # Checkbutton
+    style.configure("TCheckbutton", background=BG, foreground=TEXT,
+                    font=FNT_SM, indicatorsize=14)
+    style.map("TCheckbutton",
+              background=[("active", BG)],
+              indicatorcolor=[("selected", ACCENT), ("!selected", SURFACE2)])
+    # Label
+    style.configure("TLabel", background=BG, foreground=TEXT, font=FNT_BODY)
+    style.configure("Muted.TLabel", foreground=MUTED, font=FNT_SM)
+    style.configure("Accent.TLabel", foreground=ACCENT, font=FNT_HEAD)
+    # Frame
+    style.configure("TFrame", background=BG)
+    style.configure("Card.TFrame", background=SURFACE, relief="flat")
 
 # == Category Definitions ===================================================
 CATEGORY_DEFS = {
@@ -990,12 +1119,16 @@ def _apply_theme_by_name(name):
     _CURRENT_THEME = name
     _apply_palette(_ALL_PALETTES[name])
     _save_theme(name)
+    try: _setup_ttk_theme()  # update ttk widget styles with new colors
+    except: pass
 
 def _cycle_theme_global():
     global _CURRENT_THEME
     _CURRENT_THEME = _next_theme_name()
     _apply_palette(_ALL_PALETTES[_CURRENT_THEME])
     _save_theme(_CURRENT_THEME)
+    try: _setup_ttk_theme()
+    except: pass
     return _CURRENT_THEME
 
 def _show_theme_picker(parent, on_apply):
@@ -1103,6 +1236,59 @@ def _show_theme_picker(parent, on_apply):
     picker.after(50, lambda: _apply_dwm_to_widget(picker))
 
 # == UI Helpers =============================================================
+def _make_eye_images(size=18):
+    """Create open and closed eye images using Pillow."""
+    if not _PIL_OK: return None, None
+    s = size * 4
+    # Open eye
+    img_open = _PILImage.new("RGBA", (s, s), (0,0,0,0))
+    d = _PILDraw.Draw(img_open)
+    cx, cy = s/2, s/2
+    # Eye outline
+    d.ellipse([s*0.08, s*0.25, s*0.92, s*0.75], outline=(34,34,34,255), width=max(2,s//12))
+    # Iris
+    d.ellipse([cx-s*0.18, cy-s*0.18, cx+s*0.18, cy+s*0.18], fill=(60,60,60,255))
+    # Pupil
+    d.ellipse([cx-s*0.09, cy-s*0.09, cx+s*0.09, cy+s*0.09], fill=(20,20,20,255))
+    # Glint
+    d.ellipse([cx-s*0.14, cy-s*0.14, cx-s*0.06, cy-s*0.06], fill=(255,255,255,200))
+    img_open = img_open.resize((size, size), _PILImage.LANCZOS)
+
+    # Closed eye
+    img_closed = _PILImage.new("RGBA", (s, s), (0,0,0,0))
+    d2 = _PILDraw.Draw(img_closed)
+    import math
+    # Closed eye line with lashes
+    pts = []
+    for t in range(0, 101, 3):
+        x = s*0.1 + s*0.8*t/100
+        y = cy + s*0.06*math.sin(math.pi*t/100)
+        pts.append((x, y))
+    for i in range(len(pts)-1):
+        d2.line([pts[i], pts[i+1]], fill=(34,34,34,255), width=max(2,s//10))
+    # Lashes
+    for t in [15, 30, 50, 70, 85]:
+        x = s*0.1 + s*0.8*t/100
+        y_base = cy + s*0.06*math.sin(math.pi*t/100)
+        angle = math.pi*0.3 + math.pi*0.4*t/100
+        lx = x + s*0.1*math.cos(angle)
+        ly = y_base + s*0.12
+        d2.line([(x, y_base), (lx, ly)], fill=(34,34,34,255), width=max(1,s//16))
+    img_closed = img_closed.resize((size, size), _PILImage.LANCZOS)
+
+    return _PILImageTk.PhotoImage(img_open), _PILImageTk.PhotoImage(img_closed)
+
+# Module-level eye image cache
+_EYE_IMGS = {"open": None, "closed": None, "_init": False}
+def _get_eye_images():
+    if not _EYE_IMGS["_init"]:
+        _EYE_IMGS["_init"] = True
+        o, c = _make_eye_images(18)
+        _EYE_IMGS["open"] = o
+        _EYE_IMGS["closed"] = c
+    return _EYE_IMGS["open"], _EYE_IMGS["closed"]
+
+
 class Tooltip:
     def __init__(self, widget, text):
         self.widget = widget; self.text = text; self.tip = None
@@ -1123,7 +1309,7 @@ class Tooltip:
     def _hide(self, e=None):
         if self.tip: self.tip.destroy(); self.tip = None
 
-def _lighten(hex_color, amount=30):
+def _lighten(hex_color, amount=25):
     r,g,b = int(hex_color[1:3],16), int(hex_color[3:5],16), int(hex_color[5:7],16)
     return f"#{min(255,r+amount):02x}{min(255,g+amount):02x}{min(255,b+amount):02x}"
 
@@ -1131,33 +1317,38 @@ def _darken(hex_color, amount=20):
     r,g,b = int(hex_color[1:3],16), int(hex_color[3:5],16), int(hex_color[5:7],16)
     return f"#{max(0,r-amount):02x}{max(0,g-amount):02x}{max(0,b-amount):02x}"
 
-def mk_btn(parent, text, cmd, bg=None, fg="white", w=16, tooltip=None):
+def mk_btn(parent, text, cmd, bg=None, fg="white", w=16, tooltip=None, style=None):
     bg = bg or ACCENT
     b = tk.Button(parent, text=text, command=cmd, bg=bg, fg=fg,
                   font=FNT_BTN, relief="flat", cursor="hand2",
-                  activebackground=_lighten(bg), activeforeground=fg,
-                  padx=16, pady=9, width=w, bd=0, highlightthickness=0)
-    b.bind("<Enter>", lambda e: b.config(bg=_lighten(bg)))
-    b.bind("<Leave>", lambda e: b.config(bg=bg))
+                  activebackground=_lighten(bg, 25), activeforeground=fg,
+                  padx=18, pady=10, width=w, bd=0, highlightthickness=0)
+    _orig_bg = bg
+    def _enter(e):
+        b.config(bg=_lighten(_orig_bg, 20))
+    def _leave(e):
+        # Re-read current bg in case it was changed externally
+        b.config(bg=_orig_bg)
+    b.bind("<Enter>", _enter)
+    b.bind("<Leave>", _leave)
     if tooltip: Tooltip(b, tooltip)
     return b
 
 def mk_entry(parent, var, show=None, mono=False, w=30):
-    return tk.Entry(parent, textvariable=var,
-                    font=FNT_MONO if mono else FNT_BODY,
-                    bg=SURFACE2, fg=TEXT, insertbackground=TEXT,
-                    relief="flat", show=show or "", width=w,
-                    highlightthickness=1, highlightbackground=BORDER,
-                    highlightcolor=ACCENT)
+    e = tk.Entry(parent, textvariable=var,
+                 font=FNT_MONO if mono else FNT_BODY,
+                 bg=SURFACE2, fg=TEXT, insertbackground=ACCENT,
+                 relief="flat", show=show or "", width=w,
+                 highlightthickness=2, highlightbackground=BORDER,
+                 highlightcolor=ACCENT, selectbackground=ACCENT,
+                 selectforeground="white")
+    # Focus effect
+    e.bind("<FocusIn>", lambda ev: e.config(bg=SURFACE3))
+    e.bind("<FocusOut>", lambda ev: e.config(bg=SURFACE2))
+    return e
 
 def mk_scrollbar(parent, **kw):
-    style = ttk.Style(); style.theme_use("clam")
-    style.configure("Dark.Vertical.TScrollbar",
-                    background=SURFACE2, troughcolor=SURFACE,
-                    bordercolor=SURFACE, arrowcolor=MUTED,
-                    darkcolor=SURFACE2, lightcolor=SURFACE2)
-    style.map("Dark.Vertical.TScrollbar", background=[("active", ACCENT)])
-    return ttk.Scrollbar(parent, style="Dark.Vertical.TScrollbar", **kw)
+    return ttk.Scrollbar(parent, **kw)  # styled by _setup_ttk_theme()
 
 # == Scroll Router ==========================================================
 
@@ -1524,126 +1715,153 @@ def _check_hibp(password):
         return -1
 
 class HealthDashboard(tk.Toplevel):
-    """Premium Vault Health Dashboard."""
-    def __init__(self, master, vault, edit_callback, on_close=None):
+    """Vault Health Dashboard — rebuilt from scratch."""
+    def __init__(self, master, vault, edit_cb, on_close=None, on_breach_found=None):
         super().__init__(master)
-        self.transient(master.winfo_toplevel())
-        self.vault = vault; self._edit_cb = edit_callback
-        self._on_close = on_close
-        self.title("Vault Health"); self.configure(bg=BG)
-        self.resizable(True, True); self.grab_set()
+        self._master_root = master.winfo_toplevel()
+        self.vault = vault; self._edit_cb = edit_cb
+        self._on_close = on_close; self._on_breach_found = on_breach_found
+        self.title("Vault Health")
+        self.configure(bg=BG); self.resizable(True, True)
         self.protocol("WM_DELETE_WINDOW", self._dismiss)
         try:
             _ico = getattr(master.winfo_toplevel(), "_ico_path", None)
             if _ico: self.iconbitmap(_ico)
-        except: pass
-        _centre_on_parent(self, master, 780, 640)
-        self.minsize(650, 450)
-        self._breach_results = {}
-        self._issue_counts = {"breached": 0, "weak": 0, "reused": 0, "old": 0}
+        except Exception: pass
+        self.minsize(620, 400)
+        self._counts = {"breached": 0, "weak": 0, "reused": 0, "old": 0}
+        self._rows = []
+        # Invisible during build (alpha=0), then fade in
+        self.attributes("-alpha", 0)
+        self.transient(self._master_root)
+        self.grab_set()
+        # Center position
+        try:
+            master.update_idletasks()
+            px, py = master.winfo_rootx(), master.winfo_rooty()
+            pw, ph = master.winfo_width(), master.winfo_height()
+            x = px + (pw - 780) // 2; y = py + (ph - 620) // 2
+        except:
+            x = (self.winfo_screenwidth() - 780) // 2
+            y = (self.winfo_screenheight() - 620) // 2
+        self.geometry(f"780x620+{x}+{y}")
         self._build()
-        # DWM: ensure window is fully mapped before applying theme
+        self._scan()
         self.update_idletasks()
-        self.deiconify()
-        self.after(100, self._apply_dwm)
-        self.after(300, self._apply_dwm)  # retry for slow machines
-        self.after(200, self._run_offline_checks)
-
-    def _apply_dwm(self):
-        try: _apply_dwm_to_widget(self)
-        except: pass
+        _apply_dwm_to_widget(self)
+        # Reveal
+        self.attributes("-alpha", 1.0)
 
     def _dismiss(self):
-        self.grab_release()
-        if self._on_close:
-            try: self._on_close()
+        cb = self._on_close
+        self.grab_release(); self.destroy()
+        if cb:
+            try: cb()
             except: pass
-        self.destroy()
 
     def _build(self):
-        # Top hero section with shield graphic
-        hero = tk.Frame(self, bg=SURFACE, padx=28, pady=20)
-        hero.pack(fill="x")
-        top_row = tk.Frame(hero, bg=SURFACE); top_row.pack(fill="x")
-        # Rendered shield in hero
-        self._hero_shield = tk.Label(top_row, bg=SURFACE)
-        self._hero_shield.pack(side="left")
-        hero_img = _make_shield_image(64, None, "")
-        if hero_img:
-            self._hero_shield_img = hero_img
-            self._hero_shield.config(image=hero_img)
-        else:
-            self._hero_shield.config(text="\U0001f6e1", font=("Segoe UI",32), fg=ACCENT)
-        title_block = tk.Frame(top_row, bg=SURFACE)
-        title_block.pack(side="left", padx=(12,0))
-        tk.Label(title_block, text="Vault Health", font=("Segoe UI",18,"bold"),
+        # Hero
+        hero = tk.Frame(self, bg=SURFACE, padx=24, pady=16); hero.pack(fill="x")
+        left_h = tk.Frame(hero, bg=SURFACE); left_h.pack(side="left")
+        self._shield_lbl = tk.Label(left_h, bg=SURFACE)
+        self._shield_lbl.pack(side="left")
+        simg = _make_shield_image(52, None, "")
+        if simg: self._shield_lbl.config(image=simg); self._shield_lbl._img = simg
+        info = tk.Frame(left_h, bg=SURFACE); info.pack(side="left", padx=(12,0))
+        tk.Label(info, text="Vault Health", font=("Segoe UI",16,"bold"),
                  fg=TEXT, bg=SURFACE).pack(anchor="w")
-        self._subtitle = tk.Label(title_block, text="Scanning...", font=("Segoe UI",10),
-                                   fg=MUTED, bg=SURFACE)
-        self._subtitle.pack(anchor="w")
-
-        # Score arc (simplified as a big number + bar)
-        score_area = tk.Frame(top_row, bg=SURFACE)
-        score_area.pack(side="right", padx=(0,8))
-        self._score_num = tk.Label(score_area, text="--", font=("Consolas",36,"bold"),
+        self._status = tk.Label(info, text="Scanning...", font=("Segoe UI",9),
+                                 fg=MUTED, bg=SURFACE)
+        self._status.pack(anchor="w")
+        # Score
+        right_h = tk.Frame(hero, bg=SURFACE); right_h.pack(side="right")
+        self._score_lbl = tk.Label(right_h, text="--", font=("Consolas",32,"bold"),
                                     fg=MUTED, bg=SURFACE)
-        self._score_num.pack()
-        self._score_sub = tk.Label(score_area, text="SCORE", font=("Segoe UI",8,"bold"),
-                                    fg=MUTED, bg=SURFACE)
-        self._score_sub.pack()
-
+        self._score_lbl.pack()
         # Progress bar
-        bar_frame = tk.Frame(hero, bg=SURFACE2, height=6)
-        bar_frame.pack(fill="x", pady=(12,0)); bar_frame.pack_propagate(False)
-        self._bar = tk.Frame(bar_frame, bg=MUTED, height=6)
+        bar_bg = tk.Frame(hero, bg=SURFACE2, height=5); bar_bg.pack(fill="x", pady=(10,0))
+        bar_bg.pack_propagate(False)
+        self._bar = tk.Frame(bar_bg, bg=MUTED, height=5)
         self._bar.place(x=0, y=0, relheight=1, relwidth=0)
 
-        # Summary cards row
-        cards_row = tk.Frame(self, bg=BG, padx=24, pady=12)
-        cards_row.pack(fill="x")
-        self._stat_cards = {}
-        stats = [
-            ("breached", "\U0001f6a8 Breached", RED),
-            ("weak", "\u26a0 Weak", "#ffb347"),
-            ("reused", "\U0001f503 Reused", "#61dafb"),
-            ("old", "\u23f0 Stale", MUTED),
-        ]
-        for i, (key, title, color) in enumerate(stats):
-            card = tk.Frame(cards_row, bg=SURFACE, highlightbackground=BORDER,
-                            highlightthickness=1, padx=16, pady=10)
-            card.pack(side="left", fill="both", expand=True, padx=(0 if i==0 else 6, 0))
-            tk.Frame(card, bg=color, height=3).pack(fill="x", pady=(0,8))
-            num = tk.Label(card, text="0", font=("Consolas",22,"bold"), fg=color, bg=SURFACE)
-            num.pack()
-            tk.Label(card, text=title, font=("Segoe UI",9), fg=MUTED, bg=SURFACE).pack()
-            self._stat_cards[key] = num
+        # Stat cards
+        cards = tk.Frame(self, bg=BG, padx=20, pady=8); cards.pack(fill="x")
+        self._stat_lbls = {}
+        for key, title, color in [("breached","Breached",RED), ("weak","Weak","#ffb347"),
+                                    ("reused","Reused","#61dafb"), ("old","Stale",MUTED)]:
+            c = tk.Frame(cards, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1,
+                         padx=12, pady=8, cursor="hand2")
+            c.pack(side="left", fill="both", expand=True, padx=3)
+            tk.Frame(c, bg=color, height=2).pack(fill="x", pady=(0,6))
+            n = tk.Label(c, text="0", font=("Consolas",20,"bold"), fg=color, bg=SURFACE)
+            n.pack()
+            tk.Label(c, text=title, font=("Segoe UI",8), fg=MUTED, bg=SURFACE).pack()
+            self._stat_lbls[key] = n
+            c.bind("<Button-1>", lambda e, k=key: self._filter(k))
+            for ch in c.winfo_children():
+                ch.bind("<Button-1>", lambda e, k=key: self._filter(k))
 
-        # Breach check button
-        btn_row = tk.Frame(self, bg=BG, padx=24)
-        btn_row.pack(fill="x")
-        self._breach_btn = tk.Button(btn_row, text="\U0001f310  Check for Breaches",
-                                      font=("Segoe UI",11,"bold"), bg=ACCENT, fg="white",
-                                      relief="flat", cursor="hand2", bd=0, padx=20, pady=10,
-                                      command=self._run_breach_check)
-        self._breach_btn.pack(side="left")
-        self._breach_status = tk.Label(btn_row, text="Requires internet  \u2022  Uses Have I Been Pwned (private)",
-                                        font=("Segoe UI",9), fg=MUTED, bg=BG)
-        self._breach_status.pack(side="left", padx=(12,0))
+        # Breach check + filter row
+        btn_row = tk.Frame(self, bg=BG, padx=20); btn_row.pack(fill="x", pady=(8,4))
+        self._check_btn = tk.Button(btn_row, text="\U0001f310  Check for Breaches",
+                                     font=("Segoe UI",10,"bold"), bg=ACCENT, fg="white",
+                                     relief="flat", cursor="hand2", bd=0, padx=16, pady=8,
+                                     command=self._check_breaches)
+        self._check_btn.pack(side="left")
+        self._check_status = tk.Label(btn_row, text="", font=("Segoe UI",8), fg=MUTED, bg=BG)
+        self._check_status.pack(side="left", padx=(10,0))
+        # Auto-check toggle
+        self._auto_var = tk.BooleanVar(value=_get_auto_breach_check())
+        auto_cb = tk.Checkbutton(btn_row, text="Auto-check on launch", variable=self._auto_var,
+                                  font=("Segoe UI",8), fg=MUTED, bg=BG, selectcolor=SURFACE2,
+                                  activebackground=BG, activeforeground=TEXT,
+                                  command=lambda: _set_auto_breach_check(self._auto_var.get()))
+        auto_cb.pack(side="left", padx=(12,0))
+        # Filter buttons
+        self._filter_btns = {}
+        for fv, ft in [("all","Show All"), ("breached","Breached"), ("weak","Weak"),
+                        ("reused","Reused"), ("old","Stale")]:
+            b = tk.Button(btn_row, text=ft, font=("Segoe UI",8), bg=SURFACE2, fg=MUTED,
+                         relief="flat", cursor="hand2", bd=0, padx=8, pady=4,
+                         command=lambda v=fv: self._filter(v))
+            b.pack(side="right", padx=1)
+            self._filter_btns[fv] = b
 
-        # Guidance area — shows contextual help
-        self._guidance_frame = tk.Frame(self, bg=BG, padx=24)
-        self._guidance_frame.pack(fill="x", pady=(6,0))
-        self._guidance_lbl = tk.Label(self._guidance_frame, text="", font=("Segoe UI",9),
-                                       fg=MUTED, bg=BG, wraplength=580, justify="left", anchor="w")
-        self._guidance_lbl.pack(side="left", fill="x", expand=True)
-        mk_btn(self._guidance_frame, "\u2190  Return to Vault", self._dismiss,
-               bg=SURFACE2, fg=TEXT, w=16).pack(side="right", padx=(12,0))
+        # How it works
+        hiw = tk.Frame(self, bg=BG, padx=20); hiw.pack(fill="x")
+        self._hiw_open = False
+        self._hiw_text = tk.Label(hiw, text="", font=("Segoe UI",8), fg=MUTED, bg=BG,
+                                   wraplength=700, justify="left")
+        hiw_link = tk.Label(hiw, text="\u25b6 How does this work?", font=("Segoe UI",8),
+                            fg=ACCENT, bg=BG, cursor="hand2")
+        hiw_link.pack(anchor="w")
+        def _toggle_hiw():
+            self._hiw_open = not self._hiw_open
+            if self._hiw_open:
+                hiw_link.config(text="\u25bc How does this work?")
+                self._hiw_text.config(text=(
+                    "Your password is hashed locally (SHA-1). Only the first 5 characters of the hash "
+                    "are sent to haveibeenpwned.com. The server returns ~500 matching suffixes. "
+                    "MARAi compares locally. Your full password never leaves your machine."))
+                self._hiw_text.pack(fill="x", pady=(2,4))
+            else:
+                hiw_link.config(text="\u25b6 How does this work?")
+                self._hiw_text.pack_forget()
+        hiw_link.bind("<Button-1>", lambda e: _toggle_hiw())
 
-        # Results list
-        list_frame = tk.Frame(self, bg=BG, padx=24, pady=(12,0))
-        list_frame.pack(fill="both", expand=True)
-        canvas = tk.Canvas(list_frame, bg=BG, highlightthickness=0)
-        sb = mk_scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        # Guidance + return button
+        gf = tk.Frame(self, bg=BG, padx=20); gf.pack(fill="x", pady=(4,0))
+        self._guide = tk.Label(gf, text="", font=("Segoe UI",9), fg=MUTED, bg=BG,
+                                wraplength=550, justify="left", anchor="w")
+        self._guide.pack(side="left", fill="x", expand=True)
+        tk.Button(gf, text="\u2190 Return to Vault", font=("Segoe UI",9), bg=SURFACE2,
+                  fg=TEXT, relief="flat", cursor="hand2", bd=0, padx=12, pady=6,
+                  command=self._dismiss).pack(side="right")
+
+        # Scrollable results
+        rf = tk.Frame(self, bg=BG, padx=20); rf.pack(fill="both", expand=True, pady=(8,12))
+        canvas = tk.Canvas(rf, bg=BG, highlightthickness=0)
+        sb = mk_scrollbar(rf, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y"); canvas.pack(side="left", fill="both", expand=True)
         _install_scroll_router(self); _make_scrollable(canvas)
@@ -1652,162 +1870,142 @@ class HealthDashboard(tk.Toplevel):
         self._results.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(cw, width=e.width))
 
-    def _add_issue(self, key, entry, idx, detail=""):
-        self._issue_counts[key] += 1
-        self._stat_cards[key].config(text=str(self._issue_counts[key]))
+    def _add_row(self, key, entry, idx, detail=""):
+        self._counts[key] += 1
+        self._stat_lbls[key].config(text=str(self._counts[key]))
         colors = {"breached": RED, "weak": "#ffb347", "reused": "#61dafb", "old": MUTED}
         color = colors.get(key, MUTED)
         cat = _entry_cat(entry)
         row = tk.Frame(self._results, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
         row.pack(fill="x", pady=2)
-        # Color stripe
         tk.Frame(row, bg=color, width=4).pack(side="left", fill="y")
-        # Info block
-        info = tk.Frame(row, bg=SURFACE)
-        info.pack(side="left", fill="x", expand=True, padx=(8,0), pady=6)
-        # Row 1: emoji + name
+        info = tk.Frame(row, bg=SURFACE); info.pack(side="left", fill="x", expand=True, padx=8, pady=6)
         r1 = tk.Frame(info, bg=SURFACE); r1.pack(fill="x")
         tk.Label(r1, text=f"{CAT_EMOJI.get(cat,'')} {entry.get('name','?')}",
-                 font=("Segoe UI",10,"bold"), fg=TEXT, bg=SURFACE, anchor="w").pack(side="left")
+                 font=("Segoe UI",10,"bold"), fg=TEXT, bg=SURFACE).pack(side="left")
         if detail:
-            tk.Label(r1, text=f"  {detail}", font=("Segoe UI",9), fg=color, bg=SURFACE).pack(side="left")
-        # Row 2: username, domain/URL, masked password hint
-        context_parts = []
-        user = entry.get("user", "") or entry.get("nb_user", "")
-        if user: context_parts.append(f"User: {user}")
-        url = entry.get("url", "") or entry.get("host", "")
-        if url:
-            domain = _domain_from_url(url) or url
-            context_parts.append(domain)
-        sub = _entry_subtitle(entry)
-        if sub and sub not in " ".join(context_parts): context_parts.append(sub)
-        # Masked password hint (first 2 + last 2)
-        pw = entry.get("password", "")
-        if pw and len(pw) >= 4:
-            hint = pw[:2] + "\u2022" * min(6, len(pw)-4) + pw[-2:]
-            context_parts.append(f"Pass: {hint}")
-        elif pw:
-            context_parts.append(f"Pass: {'*' * len(pw)}")
-        if context_parts:
-            tk.Label(info, text="  \u00b7  ".join(context_parts), font=("Segoe UI",8),
-                     fg=MUTED, bg=SURFACE, anchor="w").pack(fill="x")
-        # Fix button
+            tk.Label(r1, text=f"  {detail}", font=("Segoe UI",8), fg=color, bg=SURFACE).pack(side="left")
+        # Context line
+        parts = []
+        user = entry.get("user","") or entry.get("nb_user","")
+        if user: parts.append(f"User: {user}")
+        url = entry.get("url","") or entry.get("host","")
+        if url: parts.append(_domain_from_url(url) or url)
+        pw = entry.get("password","")
+        if pw and len(pw) >= 4: parts.append(f"Pass: {pw[:2]}{'\u2022'*min(4,len(pw)-4)}{pw[-2:]}")
+        if parts:
+            tk.Label(info, text=" \u00b7 ".join(parts), font=("Segoe UI",8),
+                     fg=MUTED, bg=SURFACE).pack(fill="x")
         def _fix(i=idx):
-            cb = self._edit_cb
-            self._dismiss()
-            cb(i)
-        eb = tk.Button(row, text="Fix", font=("Segoe UI",9,"bold"), bg=color, fg="white",
-                       relief="flat", cursor="hand2", bd=0, padx=12, pady=4, command=_fix)
-        eb.pack(side="right", padx=10, pady=6)
+            cb = self._edit_cb; self._dismiss(); cb(i)
+        tk.Button(row, text="Change Password", font=("Segoe UI",8,"bold"), bg=color, fg="white",
+                  relief="flat", cursor="hand2", bd=0, padx=10, pady=4, command=_fix
+                  ).pack(side="right", padx=8, pady=6)
+        self._rows.append((key, row))
 
-    def _run_offline_checks(self):
-        pw_map = {}; total = 0; issues = 0
+    def _filter(self, fv):
+        for k, b in self._filter_btns.items():
+            b.config(bg=ACCENT if k == fv else SURFACE2, fg="white" if k == fv else MUTED)
+        for key, row in self._rows:
+            if fv == "all" or key == fv: row.pack(fill="x", pady=2)
+            else: row.pack_forget()
+
+    def _score(self):
+        total = sum(1 for e in self.vault if e.get("password"))
+        issues = sum(self._counts.values())
+        if total <= 0:
+            self._score_lbl.config(text="--", fg=MUTED)
+            self._status.config(text="No passwords in vault"); return
+        s = max(0, int(100 * max(0, total - issues) / total))
+        c = GREEN if s >= 80 else "#ffb347" if s >= 50 else RED
+        self._score_lbl.config(text=str(s), fg=c)
+        self._bar.place(relwidth=s/100); self._bar.config(bg=c)
+        self._status.config(text=f"{issues} issue{'s' if issues!=1 else ''} in {total} passwords")
+        # Update shield
+        simg = _make_shield_image(52, c if issues else None, str(issues) if issues else "\u2713")
+        if simg: self._shield_lbl.config(image=simg); self._shield_lbl._img = simg
+
+    def _scan(self):
+        """Run offline checks including stored breaches."""
+        try:
+            self._do_scan()
+        except Exception as e:
+            self._status.config(text=f"Error: {e}", fg=RED)
+
+    def _do_scan(self):
+        import hashlib
+        pw_map = {}
+        self._shown_breached_idx = set()  # track to avoid duplicates in online check
+        stored = _get_breached_hashes()
+        self._status.config(text=f"Checking {len(self.vault)} entries ({len(stored)} stored breaches)...")
         for i, entry in enumerate(self.vault):
             pw = entry.get("password","")
             if not pw: continue
-            total += 1
+            # Stored breaches
+            h = hashlib.sha1(pw.encode("utf-8")).hexdigest().upper()
+            if h in stored:
+                self._add_row("breached", entry, i, "Previously detected")
+                self._shown_breached_idx.add(i)
+            # Weak
             label, _, _ = password_strength(pw)
             if label in ("Weak","Fair"):
-                self._add_issue("weak", entry, i, f"Strength: {label}")
-                issues += 1
-            if pw not in pw_map: pw_map[pw] = []
-            pw_map[pw].append(i)
+                self._add_row("weak", entry, i, f"Strength: {label}")
+            # Old
             ts = entry.get("updated_at","")
             if ts:
                 try:
                     days = (datetime.datetime.now() - datetime.datetime.fromisoformat(ts)).days
-                    if days > 90:
-                        self._add_issue("old", entry, i, f"{days}d since update")
-                        issues += 1
+                    if days > 90: self._add_row("old", entry, i, f"{days}d old")
                 except: pass
-        for pw, indices in pw_map.items():
-            if len(indices) > 1:
-                for i in indices:
-                    self._add_issue("reused", self.vault[i], i, f"Same as {len(indices)-1} other(s)")
-                    issues += 1
-        self._update_score(total, issues)
-        # Show guidance
-        if issues > 0:
-            self._guidance_lbl.config(
-                text="\U0001f449 Click 'Fix' next to any issue to open the entry editor and change the password. "
-                     "Then click '\U0001f310 Check for Breaches' above to verify your passwords haven't appeared in known data breaches.",
-                fg=TEXT)
-        elif total > 0:
-            self._guidance_lbl.config(
-                text="\u2705 No offline issues found. Click '\U0001f310 Check for Breaches' to verify "
-                     "none of your passwords appear in known data breaches (uses haveibeenpwned.com).",
-                fg=GREEN)
+            # Reuse tracking
+            if pw not in pw_map: pw_map[pw] = []
+            pw_map[pw].append(i)
+        for pw, idxs in pw_map.items():
+            if len(idxs) > 1:
+                for i in idxs:
+                    self._add_row("reused", self.vault[i], i, f"Same as {len(idxs)-1} other(s)")
+        self._score()
+        issues = sum(self._counts.values())
+        if issues:
+            self._guide.config(text=f"\u26a0 {issues} issues found. Change affected passwords and re-check.", fg=TEXT)
         else:
-            self._guidance_lbl.config(text="")
+            self._guide.config(text="\u2714 No issues found. Run a breach check to verify online.", fg=GREEN)
 
-    def _update_score(self, total, issues=None):
-        if issues is None:
-            issues = sum(self._issue_counts.values())
-        if total <= 0:
-            self._score_num.config(text="--", fg=MUTED)
-            self._subtitle.config(text="No passwords in vault")
-            return
-        score = max(0, int(100 * max(0, total - issues) / total))
-        color = GREEN if score >= 80 else "#ffb347" if score >= 50 else RED
-        self._score_num.config(text=str(score), fg=color)
-        self._score_sub.config(fg=color)
-        self._bar.place(relwidth=score/100); self._bar.config(bg=color)
-        self._subtitle.config(text=f"{issues} issue{'s' if issues!=1 else ''} across {total} passwords")
-
-    def _run_breach_check(self):
-        self._breach_btn.config(state="disabled", text="\u23f3  Checking...")
-        self._breach_status.config(text="Connecting...", fg=MUTED)
+    def _check_breaches(self):
+        self._check_btn.config(state="disabled", text="\u23f3 Checking...")
         def _worker():
             import hashlib
             entries = [(i,e) for i,e in enumerate(self.vault) if e.get("password")]
-            checked = 0; breached = 0; errors = 0
-            breached_hashes = set()
-            for i, entry in entries:
+            breached = 0; errors = 0; bhashes = _get_breached_hashes()
+            for ci, (i, entry) in enumerate(entries):
                 pw = entry["password"]
                 count = _check_hibp(pw)
+                h = hashlib.sha1(pw.encode("utf-8")).hexdigest().upper()
                 if count > 0:
-                    breached += 1
-                    h = hashlib.sha1(pw.encode("utf-8")).hexdigest().upper()
-                    breached_hashes.add(h)
-                    self.after(0, lambda e=entry,idx=i,c=count:
-                               self._add_issue("breached", e, idx, f"{c:,} breaches"))
+                    breached += 1; bhashes.add(h)
+                    _save_breached_hashes(bhashes)
+                    if self._on_breach_found: self.after(0, lambda bh=set(bhashes): self._on_breach_found(bh))
+                    # Only add row if not already shown from stored breaches
+                    shown = getattr(self, "_shown_breached_idx", set())
+                    if i not in shown:
+                        self.after(0, lambda e=entry,idx=i,c=count: self._add_row("breached",e,idx,f"{c:,} breaches"))
+                elif count == 0:
+                    bhashes.discard(h)
                 elif count == -1:
                     errors += 1
-                checked += 1
-                self.after(0, lambda c=checked,t=len(entries):
-                           self._breach_status.config(text=f"Checked {c}/{t}..."))
+                self.after(0, lambda c=ci+1,t=len(entries): self._check_status.config(text=f"{c}/{t}"))
                 _time.sleep(0.2)
             def _done():
-                self._breach_btn.config(state="normal", text="\U0001f310  Re-check")
-                total = sum(1 for e in self.vault if e.get("password"))
-                # Save breached hashes (replaces previous results)
-                _save_breached_hashes(breached_hashes)
-                if errors:
-                    self._breach_status.config(text=f"Done. {breached} breached, {errors} failed", fg="#ffb347")
-                elif breached == 0:
-                    self._breach_status.config(text=f"\u2714  All {checked} clean!", fg=GREEN)
-                else:
-                    self._breach_status.config(text=f"\u26a0  {breached} compromised!", fg=RED)
-                self._update_score(total)
+                _save_breached_hashes(bhashes)
                 _save_last_health_check()
-                # Show guidance
-                if breached > 0:
-                    self._guidance_lbl.config(
-                        text=f"\U0001f6a8 {breached} password{'s' if breached>1 else ''} found in data breaches! "
-                             "Click 'Fix' next to each breached entry to change the password immediately. "
-                             "After changing, close this window — breached cards will be highlighted in red on your vault. "
-                             "Run another breach check after fixing to clear the alerts.",
-                        fg=RED)
-                elif errors > 0:
-                    self._guidance_lbl.config(
-                        text=f"Could not check {errors} password{'s' if errors>1 else ''} — no internet connection. "
-                             "Try again when connected.",
-                        fg="#ffb347")
-                else:
-                    self._guidance_lbl.config(
-                        text="\u2705 All your passwords are clean — none found in any known data breach. "
-                             "Close this window to return to your vault.",
-                        fg=GREEN)
+                if self._on_breach_found: self._on_breach_found(bhashes)
+                self._check_btn.config(state="normal", text="\U0001f310 Re-check")
+                if breached: self._check_status.config(text=f"\u26a0 {breached} compromised!", fg=RED)
+                elif errors: self._check_status.config(text=f"Done, {errors} failed", fg="#ffb347")
+                else: self._check_status.config(text="\u2714 All clean!", fg=GREEN)
+                self._score()
+                self._guide.config(text=f"\u26a0 {breached} breached. Change passwords and re-check." if breached
+                                   else "\u2714 All passwords clean.", fg=RED if breached else GREEN)
             self.after(0, _done)
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -2318,18 +2516,23 @@ class EntryDialog(tk.Toplevel):
                 self._pw_entries[key] = ent
                 if show:
                     _shown = [False]
-                    _EYE_CLOSED = "\u25D5"  # ◕ filled circle = closed/hidden
-                    _EYE_OPEN   = "\U0001F441"  # 👁 = open/visible
-                    eye_btn = tk.Button(pw_row, text=_EYE_CLOSED, font=("Segoe UI",13),
-                                        bg=SURFACE2, fg="#222222", relief="flat",
+                    eye_o, eye_c = _get_eye_images()
+                    eye_btn = tk.Button(pw_row, bg=SURFACE2, relief="flat",
                                         cursor="hand2", bd=0, padx=8)
+                    if eye_c:
+                        eye_btn.config(image=eye_c); eye_btn._img = eye_c
+                    else:
+                        eye_btn.config(text="\u25cf", font=("Segoe UI",12), fg="#222222")
                     def _toggle(e=ent, s=_shown, eb=eye_btn):
                         s[0] = not s[0]
                         e.config(show="" if s[0] else "\u25cf")
-                        eb.config(text=_EYE_OPEN if s[0] else _EYE_CLOSED,
-                                  fg="#222222" if s[0] else "#222222")
+                        eo, ec = _get_eye_images()
+                        if eo and ec:
+                            eb.config(image=eo if s[0] else ec); eb._img = eo if s[0] else ec
+                        else:
+                            eb.config(text="\U0001f441" if s[0] else "\u25cf")
                     eye_btn.config(command=_toggle)
-                    eye_btn.pack(side="left", padx=(6,0), ipady=6, ipadx=6)
+                    eye_btn.pack(side="left", padx=(6,0), ipady=4, ipadx=4)
                 if opts.get("gen"):
                     def _open_gen(v=var):
                         GeneratorDialog(self, on_use=lambda pw: v.set(pw))
@@ -2401,6 +2604,41 @@ class EntryDialog(tk.Toplevel):
 
 
 # == Main Vault UI ==========================================================
+class Toast:
+    """Slide-in notification bar with optional countdown."""
+    _active = None
+    _job = None
+    @staticmethod
+    def show(parent, text, color=GREEN, duration=3000, countdown=0):
+        if Toast._active:
+            try: Toast._active.destroy()
+            except: pass
+        if Toast._job:
+            try: parent.after_cancel(Toast._job)
+            except: pass
+        bar = tk.Frame(parent, bg=color, height=36)
+        bar.place(relx=0, rely=1, relwidth=1, anchor="sw")
+        bar.lift()
+        lbl = tk.Label(bar, text=text, font=("Segoe UI",10,"bold"), fg="white",
+                       bg=color, pady=8)
+        lbl.pack()
+        Toast._active = bar
+        if countdown > 0:
+            def _tick(secs):
+                if secs <= 0 or not bar.winfo_exists():
+                    try: bar.destroy()
+                    except: pass
+                    Toast._active = None; return
+                lbl.config(text=f"\U0001f4cb Copied \u2014 clipboard clears in {secs}s")
+                Toast._job = parent.after(1000, lambda: _tick(secs - 1))
+            _tick(countdown)
+        else:
+            def _remove():
+                try: bar.destroy()
+                except: pass
+                Toast._active = None
+            Toast._job = parent.after(duration, _remove)
+
 class VaultApp(tk.Frame):
     def __init__(self, master, key, on_lock, vault_file=None, meta_file=None):
         super().__init__(master, bg=BG)
@@ -2408,12 +2646,14 @@ class VaultApp(tk.Frame):
         self.vault_file = vault_file or VAULT_FILE
         self.meta_file  = meta_file  or META_FILE
         self.vault = []; self.pw_visible = {}
-        self._view_mode = _get_saved_view_mode()
         self._active_subcat = "All"; self._detail_idx = None
         self._auto_lock_job = None; self._AUTO_LOCK_SECS = 180
         self._last_activity = _time.time()
         self._load_vault(); self.pack(fill="both", expand=True)
-        self._build_ui(); self._render()
+        self._build_ui()
+        # Defer first render until canvas has its real dimensions
+        self._initial_render_done = False
+        self.after(150, self._first_render)
         self._reset_auto_lock()
         root = self.winfo_toplevel()
         for ev in ("<Motion>", "<KeyPress>", "<ButtonPress>", "<MouseWheel>"):
@@ -2437,7 +2677,7 @@ class VaultApp(tk.Frame):
 
     def _build_ui(self):
         # Header
-        hdr = tk.Frame(self, bg=SURFACE, pady=12,
+        hdr = tk.Frame(self, bg=SURFACE, pady=14,
                        highlightbackground=BORDER, highlightthickness=1)
         hdr.pack(fill="x")
         left = tk.Frame(hdr, bg=SURFACE); left.pack(side="left", padx=20)
@@ -2453,7 +2693,16 @@ class VaultApp(tk.Frame):
         self._update_shield_display(None, "")  # clean shield until scan completes
         self._health_shield.bind("<Button-1>", lambda e: self._open_health())
         Tooltip(self._health_shield, "Vault Health — click to review")
+        # Issues filter — single toggle button
+        tk.Frame(left, bg=BORDER, width=1, height=28).pack(side="left", padx=(12,8), fill="y")
+        self._health_filter = "all"
+        self._issues_btn = tk.Button(left, text="\u26a0 Issues", font=("Segoe UI",9,"bold"),
+                                      bg=BG, fg=MUTED, relief="flat", cursor="hand2", bd=0,
+                                      padx=8, pady=2, command=self._toggle_issues_filter)
+        self._issues_btn.pack(side="left")
         self.after(500, self._update_health_indicator)
+        self.after(2000, self._check_backup_reminder)
+        self.after(3000, self._auto_breach_check)
 
         right = tk.Frame(hdr, bg=SURFACE); right.pack(side="right", padx=20)
         self.count_lbl = tk.Label(right, text="", font=FNT_SM, fg=MUTED, bg=SURFACE)
@@ -2521,15 +2770,19 @@ class VaultApp(tk.Frame):
             self._ctx_toggle_buttons[ctx] = b
         self._update_ctx_toggles()
 
-        vm_frame = tk.Frame(toolbar, bg=BG); vm_frame.pack(side="right", padx=(10,0))
-        self._vm_btns = {}
-        for mode, icon, tip in [("list","\u2261","List"),("small","\u229e","Small"),
-                                ("medium","\u25a6","Medium"),("large","\u25a1","Large")]:
-            b = tk.Button(vm_frame, text=icon, font=("Segoe UI",11), relief="flat",
-                          cursor="hand2", bd=0, padx=8, pady=5,
-                          command=lambda m=mode: self._set_view_mode(m))
-            b.pack(side="left", padx=2); self._vm_btns[mode] = b; Tooltip(b, tip)
-        self._update_vm_btns()
+        # Layout control — single unified column chooser
+        self._grid_cols = _load_config().get("grid_cols", 3)
+        lc = tk.Frame(toolbar, bg=BG); lc.pack(side="right", padx=(10,0))
+        tk.Button(lc, text="\u25c0", font=("Segoe UI",9), bg=SURFACE2, fg=TEXT,
+                  relief="flat", cursor="hand2", bd=0, padx=5, pady=4,
+                  command=lambda: self._set_cols(-1)).pack(side="left")
+        self._cols_lbl = tk.Label(lc, text="", font=("Segoe UI",9),
+                                   fg=MUTED, bg=BG, width=8)
+        self._cols_lbl.pack(side="left", padx=3)
+        tk.Button(lc, text="\u25b6", font=("Segoe UI",9), bg=SURFACE2, fg=TEXT,
+                  relief="flat", cursor="hand2", bd=0, padx=5, pady=4,
+                  command=lambda: self._set_cols(1)).pack(side="left")
+        self._update_cols_label()
 
         # Zoom controls
         self._zoom = _get_zoom_level()
@@ -2549,8 +2802,9 @@ class VaultApp(tk.Frame):
                tooltip="Export (JSON/CSV)").pack(side="left", padx=(0,4))
         mk_btn(ie_frame, "\u2b07 Import", self._import_vault, bg=SURFACE2, fg=TEXT, w=9,
                tooltip="Import (JSON/CSV)").pack(side="left", padx=(0,4))
-        mk_btn(ie_frame, "\U0001f4be Backup", self._backup_vault, bg=SURFACE2, fg=TEXT, w=9,
-               tooltip="Encrypted backup").pack(side="left")
+        self._backup_btn = mk_btn(ie_frame, "\U0001f4be Backup", self._backup_vault, bg=SURFACE2, fg=TEXT, w=9,
+               tooltip="Encrypted backup")
+        self._backup_btn.pack(side="left")
 
         # Filters
         self.active_type = tk.StringVar(value="All")
@@ -2574,7 +2828,7 @@ class VaultApp(tk.Frame):
         content.grid_rowconfigure(0, weight=1)
         cards_outer = tk.Frame(content, bg=BG)
         cards_outer.grid(row=0, column=0, sticky="nsew")
-        self.canvas = tk.Canvas(cards_outer, bg=BG, highlightthickness=0)
+        self.canvas = tk.Canvas(cards_outer, bg=BG, highlightthickness=0, bd=0)
         sb = mk_scrollbar(cards_outer, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
@@ -2616,10 +2870,25 @@ class VaultApp(tk.Frame):
         for t, btn in self._type_btns.items():
             btn.config(bg=ACCENT if t==at else SURFACE2,
                        fg="white" if t==at else _cat_colors(t)[0] if t!="All" else MUTED)
-    def _set_view_mode(self, mode):
-        self._view_mode = mode; _save_view_mode(mode)
-        self._close_detail()
-        self._update_vm_btns(); self._render()
+    def _set_cols(self, delta):
+        self._grid_cols = max(1, min(6, self._grid_cols + delta))
+        self._update_cols_label()
+        cfg = _load_config(); cfg["grid_cols"] = self._grid_cols; _save_config(cfg)
+        self._render()
+    def _update_cols_label(self):
+        if self._grid_cols == 1:
+            self._cols_lbl.config(text="\u2261 List")
+        else:
+            self._cols_lbl.config(text=f"\u25a6 {self._grid_cols} columns")
+
+    def _toggle_issues_filter(self):
+        if self._health_filter == "all":
+            self._health_filter = "issues"
+            self._issues_btn.config(bg=RED, fg="white", text="\u26a0 Showing Issues Only")
+        else:
+            self._health_filter = "all"
+            self._issues_btn.config(bg=BG, fg=MUTED, text="\u26a0 Issues")
+        self._render()
     def _set_zoom(self, delta):
         self._zoom = max(60, min(180, self._zoom + delta))
         _save_zoom_level(self._zoom)
@@ -2635,10 +2904,6 @@ class VaultApp(tk.Frame):
     def _zoom_icon_key(self):
         """Return icon size key based on zoom."""
         return "64" if self._zoom >= 120 else "40"
-    def _update_vm_btns(self):
-        for mode, btn in self._vm_btns.items():
-            btn.config(bg=ACCENT if mode==self._view_mode else SURFACE2,
-                       fg="white" if mode==self._view_mode else MUTED)
     def _open_theme_picker(self):
         def _on_pick(name):
             app = self.winfo_toplevel()
@@ -2758,21 +3023,46 @@ class VaultApp(tk.Frame):
                 json.dump({"backup_date":datetime.datetime.now().isoformat(timespec="seconds"),
                            "marai_version":VERSION,"entry_count":len(self.vault)}, f, indent=2)
             messagebox.showinfo("Backup",f"\u2705 Backup saved to:\n{bd}",parent=self.winfo_toplevel())
+            _save_backup_date()
+            # Reset backup button to normal
+            try: self._backup_btn.config(bg=SURFACE2, fg=TEXT, text="\U0001f4be Backup")
+            except: pass
+            try: Tooltip(self._backup_btn, "Encrypted backup")
+            except: pass
         except Exception as e:
             messagebox.showerror("Failed",str(e),parent=self.winfo_toplevel())
+
+    def _first_render(self):
+        """Initial render — blocks resize-triggered re-renders."""
+        self._render()
+        self._initial_render_done = True
 
     # -- Render -------------------------------------------------------------
     def _on_canvas_resize(self, event):
         self.canvas.itemconfig(self._cw, width=event.width)
+        if not getattr(self, "_initial_render_done", False): return
         if event.width != self._last_canvas_width:
             self._last_canvas_width = event.width
             if self._resize_job: self.after_cancel(self._resize_job)
-            self._resize_job = self.after(120, self._render)
+            self._resize_job = self.after(200, self._render)
 
     def _render(self):
+        # Skip if canvas has no real width yet (prevents wrong layout on launch)
+        cw = self.canvas.winfo_width()
+        if cw < 50:
+            if getattr(self, "_initial_render_done", False):
+                return  # don't retry if we've already rendered once
+            self.after(100, self._render)
+            return
+        self.cards_frame.unbind("<Configure>")
         for w in self.cards_frame.winfo_children(): w.destroy()
         self.pw_visible.clear()
-        self._breached_set = _get_breached_hashes()  # cache for card renderers
+        # Merge stored breaches with in-memory set (never lose in-memory data)
+        file_set = _get_breached_hashes()
+        if not hasattr(self, "_breached_set") or not self._breached_set:
+            self._breached_set = file_set
+        elif file_set:
+            self._breached_set = self._breached_set | file_set
         # Build password health issues cache: idx -> list of issue labels
         import hashlib as _hl
         self._entry_issues = {}
@@ -2816,6 +3106,12 @@ class VaultApp(tk.Frame):
             return q in " ".join(str(v) for v in e.values() if isinstance(v,str)).lower()
         filtered = sorted([e for e in self.vault if _m(e)],
                           key=lambda e: (not e.get("favourite",False),))
+        # Apply health filter (overrides category/context when active)
+        hf = getattr(self, "_health_filter", "all")
+        if hf == "issues":
+            filtered = [e for e in self.vault
+                        if self._entry_issues.get(self.vault.index(e), [])]
+            filtered.sort(key=lambda e: (not e.get("favourite",False),))
         n = len(self.vault)
         self.count_lbl.config(text=f"{n} entr{'y' if n==1 else 'ies'}")
         if not filtered:
@@ -2823,18 +3119,25 @@ class VaultApp(tk.Frame):
                   else "Your vault is empty.\nClick '+ Add Entry' to start."
             tk.Label(self.cards_frame, text=msg, font=FNT_BODY, fg=MUTED, bg=BG,
                      justify="center").pack(pady=80)
+            self.cards_frame.bind("<Configure>",
+                lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+            self.cards_frame.update_idletasks()
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
             return
-        mode = self._view_mode; cw = self.canvas.winfo_width()
-        if mode == "list":
+        cols = getattr(self, "_grid_cols", 3); cw = self.canvas.winfo_width()
+        if cols == 1:
             self.cards_frame.grid_columnconfigure(0, weight=1)
             for i, entry in enumerate(filtered):
                 self._make_row(self.cards_frame, entry, self.vault.index(entry), i)
         else:
-            cols = max(1, min(4, cw//240)) if mode=="small" else (1 if mode=="large" else (1 if cw<640 else 2))
-            for c in range(4):
+            cols = getattr(self, "_grid_cols", 3)
+            for c in range(6):
                 self.cards_frame.grid_columnconfigure(c, weight=1 if c<cols else 0,
                                                       uniform="col" if c<cols else "")
-            CH = self._zoom_scale(102 if mode=="small" else (174 if mode=="large" else 138))
+            # Fixed card height per column count
+            if cols >= 4: CH = self._zoom_scale(110)
+            elif cols == 3: CH = self._zoom_scale(120)
+            else: CH = self._zoom_scale(150)
             nr = (len(filtered)+cols-1)//cols
             for r in range(nr): self.cards_frame.grid_rowconfigure(r, weight=0, minsize=CH)
             for i, entry in enumerate(filtered):
@@ -2842,11 +3145,14 @@ class VaultApp(tk.Frame):
                 cell = tk.Frame(self.cards_frame, bg=BG)
                 cell.grid(row=r, column=c, sticky="nsew", padx=8, pady=8)
                 cell.grid_rowconfigure(0, weight=1); cell.grid_columnconfigure(0, weight=1)
-                if mode=="small": self._make_card_small(cell, entry, ri)
-                elif mode=="large": self._make_card(cell, entry, ri, compact=False)
+                if cols >= 3: self._make_card_small(cell, entry, ri)
                 else: self._make_card(cell, entry, ri, compact=True)
-        # Force layout update and scroll to top to prevent blank page
+        # Rebind, layout, reveal all at once
+        self.cards_frame.bind("<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.cards_frame.update_idletasks()
+        w = self.canvas.winfo_width()
+        if w > 1: self.canvas.itemconfig(self._cw, width=w)
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         self.canvas.yview_moveto(0)
 
@@ -3005,15 +3311,19 @@ class VaultApp(tk.Frame):
                  ).pack(side="left", fill="x", expand=True)
         bf = tk.Frame(vr, bg=SURFACE2); bf.pack(side="right")
         if masked:
-            _EYE_CLOSED = "\u25D5"
-            _EYE_OPEN   = "\U0001F441"
-            eye_btn = tk.Button(bf, text=_EYE_CLOSED, font=("Segoe UI",12),
-                                bg=SURFACE2, fg="#222222", relief="flat",
+            eye_o, eye_c = _get_eye_images()
+            eye_btn = tk.Button(bf, bg=SURFACE2, relief="flat",
                                 cursor="hand2", bd=0, padx=6)
+            if eye_c:
+                eye_btn.config(image=eye_c); eye_btn._img = eye_c
+            else:
+                eye_btn.config(text="\u25cf", font=("Segoe UI",12), fg="#222222")
             def _t(v=value, d=dv, s=_s, eb=eye_btn):
                 s[0] = not s[0]
                 d.set(v if s[0] else "\u25cf \u25cf \u25cf \u25cf \u25cf \u25cf")
-                eb.config(text=_EYE_OPEN if s[0] else _EYE_CLOSED)
+                eo, ec = _get_eye_images()
+                if eo and ec:
+                    eb.config(image=eo if s[0] else ec); eb._img = eo if s[0] else ec
             eye_btn.config(command=_t)
             eye_btn.pack(side="left")
         def _cv(v=value):
@@ -3043,7 +3353,7 @@ class VaultApp(tk.Frame):
 
     def _issue_badge_text(self, issues):
         """Return a short badge string for card display."""
-        if "breached" in issues: return "\u26a0 BREACHED"
+        if "breached" in issues: return "BREACHED"
         parts = []
         if "weak" in issues: parts.append("Weak")
         if "reused" in issues: parts.append("Reused")
@@ -3069,8 +3379,10 @@ class VaultApp(tk.Frame):
         issue_color = self._issue_color(entry_issues)
         rb = SURFACE3 if is_act else (SURFACE if row_num%2==0 else SURFACE2)
 
-        row = tk.Frame(parent, bg=rb, cursor="hand2")
-        row.grid(row=row_num, column=0, sticky="ew", padx=6, pady=1)
+        row = tk.Frame(parent, bg=rb, cursor="hand2",
+                       highlightbackground=BORDER if is_act else rb,
+                       highlightthickness=1 if is_act else 0)
+        row.grid(row=row_num, column=0, sticky="ew", padx=10, pady=3)
         row.bind("<Enter>", lambda e,r=row,i=idx:
                  r.config(bg=SURFACE3) if self._detail_idx!=i else None)
         row.bind("<Leave>", lambda e,r=row,i=idx:
@@ -3156,32 +3468,36 @@ class VaultApp(tk.Frame):
         card.bind("<Enter>", lambda e,c=card: c.config(highlightbackground=ACCENT))
         card.bind("<Leave>", lambda e,c=card: c.config(highlightbackground=bdr))
         stripe_color = issue_color if has_issues else fg_c
+        # Tinted card background for issues
+        card_bg = _tint_surface(RED, 0.18) if is_breached else (_tint_surface(issue_color, 0.12) if has_issues else SURFACE)
+        card.config(bg=card_bg)
         tk.Frame(card, bg=stripe_color, height=3).pack(fill="x")
         if has_issues:
             badge_text = self._issue_badge_text(entry_issues)
+            if is_breached: badge_text += " — Change immediately"
             badge_bg = issue_color or MUTED
             tk.Label(card, text=f"\u26a0 {badge_text}", font=("Segoe UI",7,"bold"),
                      fg="white", bg=badge_bg, padx=4).pack(fill="x")
         pad = self._zoom_scale(10)
-        inner = tk.Frame(card, bg=SURFACE, padx=pad, pady=pad, cursor="hand2")
+        inner = tk.Frame(card, bg=card_bg, padx=pad, pady=pad, cursor="hand2")
         inner.pack(fill="both", expand=True)
-        top = tk.Frame(inner, bg=SURFACE, cursor="hand2"); top.pack(fill="x")
+        top = tk.Frame(inner, bg=card_bg, cursor="hand2"); top.pack(fill="x")
         ifs = self._zoom_scale(20)
         ic = tk.Label(top, text=CAT_EMOJI.get(cat,"\U0001f511"), font=("Segoe UI Emoji",ifs),
                       bg=bg_c, fg=fg_c, padx=self._zoom_scale(6), pady=self._zoom_scale(4), cursor="hand2")
         ic.pack(side="left")
         ik = self._zoom_icon_key()
         cached = _get_icon(entry, ik)
-        if cached: ic.config(image=cached, text="", bg=SURFACE); ic._img = cached
+        if cached: ic.config(image=cached, text="", bg=card_bg); ic._img = cached
         else:
             def _ic(d,icons,lbl=ic,k=ik):
                 img = icons.get(k) if icons else None
-                if img and lbl.winfo_exists(): lbl.config(image=img,text="", bg=SURFACE); lbl._img=img
+                if img and lbl.winfo_exists(): lbl.config(image=img,text="", bg=card_bg); lbl._img=img
             _get_icon(entry, ik, on_ready=lambda d,icons: self.after(0, lambda: _ic(d,icons)))
         name = entry.get("name","")
         nfs = self._zoom_scale(9)
         tk.Label(top, text=name[:20]+("\u2026" if len(name)>20 else ""),
-                 font=("Segoe UI",nfs,"bold"), fg=TEXT, bg=SURFACE, anchor="w",
+                 font=("Segoe UI",nfs,"bold"), fg=TEXT, bg=card_bg, anchor="w",
                  wraplength=self._zoom_scale(120), cursor="hand2").pack(side="left", padx=(6,0), fill="x", expand=True)
         sfs = self._zoom_scale(8)
         tk.Label(inner, text=f"{CONTEXT_EMOJI.get(ctx,'')} {ctx}  \u00b7  {CAT_EMOJI.get(cat,'')} {cat}",
@@ -3190,10 +3506,10 @@ class VaultApp(tk.Frame):
         sub = _entry_subtitle(entry)
         if sub:
             tk.Label(inner, text=sub[:30]+("\u2026" if len(sub)>30 else ""),
-                     font=("Segoe UI",8), fg=ACCENT, bg=SURFACE, anchor="w").pack(anchor="w")
+                     font=("Segoe UI",8), fg=ACCENT, bg=card_bg, anchor="w").pack(anchor="w")
 
         # Quick action row - Open/Connect instead of fields
-        acts = tk.Frame(inner, bg=SURFACE); acts.pack(fill="x", pady=(6,0))
+        acts = tk.Frame(inner, bg=card_bg); acts.pack(fill="x", pady=(6,0))
         def _mk(t,cmd,col=MUTED):
             b = tk.Button(acts, text=t, font=("Segoe UI",9), bg=SURFACE2, fg=col,
                           relief="flat", cursor="hand2", bd=0, padx=6, pady=2)
@@ -3218,12 +3534,12 @@ class VaultApp(tk.Frame):
         elif cat != "Secure Note" and entry.get("password"):
             _mk("\U0001f4cb Copy", lambda pw=entry["password"]: self._copy_secure(pw)).pack(side="left")
         # Right: fav, edit, delete - nicer fonts
-        right_acts = tk.Frame(acts, bg=SURFACE); right_acts.pack(side="right")
+        right_acts = tk.Frame(acts, bg=card_bg); right_acts.pack(side="right")
         def _mkr(t,cmd,col=MUTED):
-            b = tk.Button(right_acts, text=t, font=("Segoe UI",9), bg=SURFACE, fg=col,
+            b = tk.Button(right_acts, text=t, font=("Segoe UI",9), bg=card_bg, fg=col,
                           relief="flat", cursor="hand2", bd=0, padx=4)
             b.bind("<Enter>", lambda e: b.config(bg=ACCENT,fg="white"))
-            b.bind("<Leave>", lambda e: b.config(bg=SURFACE,fg=col))
+            b.bind("<Leave>", lambda e: b.config(bg=card_bg,fg=col))
             b.config(command=cmd); return b
         s = _mkr("\u2605" if is_fav else "\u2606", None, col="#f5c518" if is_fav else MUTED)
         def _fv(i=idx):
@@ -3259,43 +3575,44 @@ class VaultApp(tk.Frame):
         card.bind("<Enter>", lambda e,c=card: c.config(highlightbackground=ACCENT))
         card.bind("<Leave>", lambda e,c=card: c.config(highlightbackground=bdr))
         stripe_color = issue_color if has_issues else fg_c
+        card_bg = _tint_surface(RED, 0.18) if is_breached else (_tint_surface(issue_color, 0.12) if has_issues else SURFACE)
+        card.config(bg=card_bg)
         tk.Frame(card, bg=stripe_color, width=4).pack(side="left", fill="y")
-        inner = tk.Frame(card, bg=SURFACE, padx=16, pady=14, cursor="hand2")
+        inner = tk.Frame(card, bg=card_bg, padx=16, pady=14, cursor="hand2")
         inner.pack(side="left", fill="both", expand=True)
         if has_issues:
             badge_text = self._issue_badge_text(entry_issues)
-            badge_bg = issue_color or MUTED
-            msg = f"\u26a0 {badge_text}" + (" \u2014 Change immediately" if is_breached else "")
-            tk.Label(inner, text=msg, font=("Segoe UI",8,"bold"), fg="white", bg=badge_bg,
-                     padx=8, pady=3).pack(fill="x", pady=(0,6))
-        hdr = tk.Frame(inner, bg=SURFACE, cursor="hand2"); hdr.pack(fill="x")
+            msg = f"\u26a0 {badge_text}" + (" — Change immediately" if is_breached else "")
+            tk.Label(inner, text=msg, font=("Segoe UI",8,"bold"), fg=issue_color, bg=card_bg,
+                     anchor="w").pack(fill="x", pady=(0,4))
+        hdr = tk.Frame(inner, bg=card_bg, cursor="hand2"); hdr.pack(fill="x")
         ic = tk.Label(hdr, text=CAT_EMOJI.get(cat,"\U0001f511"), font=("Segoe UI Emoji",28),
                       bg=bg_c, fg=fg_c, padx=10, pady=8, relief="flat", cursor="hand2")
         ic.pack(side="left")
         cached = _get_icon(entry, "64")
-        if cached: ic.config(image=cached, text="", bg=SURFACE); ic._img = cached
+        if cached: ic.config(image=cached, text="", bg=card_bg); ic._img = cached
         else:
             def _ic(d,icons,lbl=ic):
                 img = icons.get("64") if icons else None
-                if img and lbl.winfo_exists(): lbl.config(image=img,text="", bg=SURFACE); lbl._img=img
+                if img and lbl.winfo_exists(): lbl.config(image=img,text="", bg=card_bg); lbl._img=img
             _get_icon(entry, "64", on_ready=lambda d,icons: self.after(0, lambda: _ic(d,icons)))
-        info = tk.Frame(hdr, bg=SURFACE, cursor="hand2")
+        info = tk.Frame(hdr, bg=card_bg, cursor="hand2")
         info.pack(side="left", padx=(10,0), fill="x", expand=True)
-        tk.Label(info, text=entry.get("name",""), font=FNT_HEAD, fg=TEXT, bg=SURFACE, anchor="w").pack(anchor="w")
-        badges = tk.Frame(info, bg=SURFACE); badges.pack(anchor="w")
-        tk.Label(badges, text=f"{CAT_EMOJI.get(cat,'')} {cat}", font=FNT_SM, fg=fg_c, bg=SURFACE).pack(side="left")
-        tk.Label(badges, text=" \u00b7 ", font=FNT_SM, fg=MUTED, bg=SURFACE).pack(side="left")
-        tk.Label(badges, text=f"{CONTEXT_EMOJI.get(ctx,'')} {ctx}", font=FNT_SM, fg=ctx_fg, bg=SURFACE).pack(side="left")
+        tk.Label(info, text=entry.get("name",""), font=FNT_HEAD, fg=TEXT, bg=card_bg, anchor="w").pack(anchor="w")
+        badges = tk.Frame(info, bg=card_bg); badges.pack(anchor="w")
+        tk.Label(badges, text=f"{CAT_EMOJI.get(cat,'')} {cat}", font=FNT_SM, fg=fg_c, bg=card_bg).pack(side="left")
+        tk.Label(badges, text=" \u00b7 ", font=FNT_SM, fg=MUTED, bg=card_bg).pack(side="left")
+        tk.Label(badges, text=f"{CONTEXT_EMOJI.get(ctx,'')} {ctx}", font=FNT_SM, fg=ctx_fg, bg=card_bg).pack(side="left")
         # Subtitle - connection details, domain, card number, etc.
         sub = _entry_subtitle(entry)
         if sub:
-            tk.Label(info, text=sub, font=("Segoe UI",9), fg=ACCENT, bg=SURFACE, anchor="w").pack(anchor="w")
-        acts = tk.Frame(hdr, bg=SURFACE); acts.pack(side="right", padx=(4,0))
+            tk.Label(info, text=sub, font=("Segoe UI",9), fg=ACCENT, bg=card_bg, anchor="w").pack(anchor="w")
+        acts = tk.Frame(hdr, bg=card_bg); acts.pack(side="right", padx=(4,0))
         def _mk(t,cmd,col=MUTED):
-            b = tk.Button(acts, text=t, font=("Segoe UI",10), bg=SURFACE, fg=col,
+            b = tk.Button(acts, text=t, font=("Segoe UI",10), bg=card_bg, fg=col,
                           relief="flat", cursor="hand2", bd=0, padx=5)
             b.bind("<Enter>", lambda e: b.config(bg=ACCENT,fg="white"))
-            b.bind("<Leave>", lambda e: b.config(bg=SURFACE,fg=col))
+            b.bind("<Leave>", lambda e: b.config(bg=card_bg,fg=col))
             b.config(command=cmd); return b
         fb = _mk("\u2605" if is_fav else "\u2606", None, col="#f5c518" if is_fav else MUTED)
         fb.pack(side="left")
@@ -3316,7 +3633,7 @@ class VaultApp(tk.Frame):
         if cat == "Secure Note":
             body = entry.get("body","")
             tk.Label(inner, text=(body[:160]+"\u2026" if len(body)>160 else body) or "Empty note.",
-                     font=FNT_SM, fg=TEXT, bg=SURFACE, anchor="w", justify="left", wraplength=320).pack(anchor="w")
+                     font=FNT_SM, fg=TEXT, bg=card_bg, anchor="w", justify="left", wraplength=320).pack(anchor="w")
             tk.Button(inner, text="\U0001f4cb  Copy Note", font=FNT_SM, bg=SURFACE2, fg=MUTED,
                       relief="flat", cursor="hand2", bd=0, padx=8, pady=4,
                       command=lambda b=body: self._copy_secure(b)).pack(anchor="w", pady=(6,0))
@@ -3326,7 +3643,7 @@ class VaultApp(tk.Frame):
             if cat == "Server / RDP" and cred_ref:
                 resolved_user, _ = self._resolve_credential(entry)
                 tk.Label(inner, text=f"\U0001f517 {cred_ref}" + (f"  ({resolved_user})" if resolved_user else ""),
-                         font=("Segoe UI",9), fg=ACCENT, bg=SURFACE, anchor="w").pack(anchor="w", pady=(0,4))
+                         font=("Segoe UI",9), fg=ACCENT, bg=card_bg, anchor="w").pack(anchor="w", pady=(0,4))
             else:
                 if entry.get("user"): self._field(inner, "User", entry["user"], idx, False)
             if entry.get("password"): self._field(inner, "Pass", entry["password"], idx, True)
@@ -3348,9 +3665,9 @@ class VaultApp(tk.Frame):
                       ).pack(anchor="w", pady=(8,0))
         if entry.get("notes"):
             tk.Label(inner, text=f"\U0001f4dd  {entry['notes']}", font=FNT_SM, fg=MUTED,
-                     bg=SURFACE, anchor="w", wraplength=320).pack(anchor="w", pady=(6,0))
+                     bg=card_bg, anchor="w", wraplength=320).pack(anchor="w", pady=(6,0))
         at, ac = _password_age(entry)
-        tk.Label(inner, text=at, font=FNT_SM, fg=ac, bg=SURFACE, anchor="w").pack(anchor="w", pady=(4,0))
+        tk.Label(inner, text=at, font=FNT_SM, fg=ac, bg=card_bg, anchor="w").pack(anchor="w", pady=(4,0))
         self.after_idle(lambda c=card, i=idx: self._bind_click_recursive(c,i))
 
     def _field(self, parent, label, value, idx, masked):
@@ -3364,14 +3681,20 @@ class VaultApp(tk.Frame):
         lbl.pack(side="left", fill="x", expand=True, ipady=7)
         if masked:
             self.pw_visible[key] = False
-            _EYE_C = "\u25D5"; _EYE_O = "\U0001F441"
-            eye_btn = tk.Button(row, text=_EYE_C, font=("Segoe UI",12),
-                                bg=SURFACE2, fg="#222222", relief="flat",
+            eye_o, eye_c = _get_eye_images()
+            eye_btn = tk.Button(row, bg=SURFACE2, relief="flat",
                                 cursor="hand2", bd=0, padx=6)
+            if eye_c:
+                eye_btn.config(image=eye_c); eye_btn._img = eye_c
+            else:
+                eye_btn.config(text="\u25cf", font=("Segoe UI",12), fg="#222222")
             def toggle(l=lbl,v=value,k=key,eb=eye_btn):
                 self.pw_visible[k] = not self.pw_visible[k]
                 l.config(text=v if self.pw_visible[k] else "\u25cf \u25cf \u25cf \u25cf \u25cf \u25cf")
-                eb.config(text=_EYE_O if self.pw_visible[k] else _EYE_C)
+                eo, ec = _get_eye_images()
+                if eo and ec:
+                    eb.config(image=eo if self.pw_visible[k] else ec)
+                    eb._img = eo if self.pw_visible[k] else ec
             eye_btn.config(command=toggle)
             eye_btn.pack(side="right", padx=2)
         tk.Button(row, text="\U0001f4cb", font=FNT_SM, bg=SURFACE2, fg=MUTED,
@@ -3387,8 +3710,12 @@ class VaultApp(tk.Frame):
         self.after(500, lambda: [w.config(bg=SURFACE2) for w in widgets if w.winfo_exists()])
 
     def _copy_secure(self, value, clear_after=30):
-        """Copy to clipboard securely (excludes from Windows clipboard history)."""
+        """Copy to clipboard securely with toast notification."""
         _clipboard_copy_secure(value, self, clear_after=clear_after)
+        if clear_after > 0:
+            Toast.show(self.winfo_toplevel(), "", ACCENT, countdown=clear_after)
+        else:
+            Toast.show(self.winfo_toplevel(), "\U0001f4cb Copied to clipboard", ACCENT, 3000)
 
     # -- Auto-lock, update, misc -------------------------------------------
     def _on_update_found(self, nv): self.after(0, lambda: self._show_update_banner(nv))
@@ -3417,10 +3744,62 @@ class VaultApp(tk.Frame):
         self.vault = []; self.key = None; self.on_lock()
     def _open_generator(self): GeneratorDialog(self.winfo_toplevel())
     def _open_health(self):
+        # Prevent double-open
+        if hasattr(self, "_health_open") and self._health_open: return
+        self._health_open = True
         def _on_close():
+            self._health_open = False
+            self._update_health_indicator()
+        def _on_breach(hashes):
+            self._breached_set = hashes
+            _save_breached_hashes(hashes)
             self._update_health_indicator()
             self._render()
-        HealthDashboard(self.winfo_toplevel(), self.vault, self._edit, on_close=_on_close)
+        HealthDashboard(self.winfo_toplevel(), self.vault, self._edit,
+                        on_close=_on_close, on_breach_found=_on_breach)
+
+    def _check_backup_reminder(self):
+        if _check_backup_reminder() and len(self.vault) > 0:
+            try:
+                self._backup_btn.config(bg=SURFACE2, fg="#cc7700",
+                                         text="\u26a0 \U0001f4be Backup")
+                Tooltip(self._backup_btn, "No backup in 7+ days — click to backup now")
+            except: pass
+
+    def _on_breach_found(self, hashes):
+        """Called from dashboard when breaches are found. Updates VaultApp's set."""
+        self._breached_set = hashes
+        _save_breached_hashes(hashes)
+        self._update_health_indicator()
+
+    def _auto_breach_check(self):
+        """Run breach check silently in background if auto-check is enabled."""
+        if not _get_auto_breach_check(): return
+        if not self.vault: return
+        def _worker():
+            import hashlib
+            bhashes = _get_breached_hashes()
+            changed = False
+            for entry in self.vault:
+                pw = entry.get("password","")
+                if not pw: continue
+                h = hashlib.sha1(pw.encode("utf-8")).hexdigest().upper()
+                if h in bhashes: continue  # already known
+                count = _check_hibp(pw)
+                if count > 0:
+                    bhashes.add(h); changed = True
+                    _save_breached_hashes(bhashes)
+                elif count == 0:
+                    bhashes.discard(h)
+                _time.sleep(0.3)
+            _save_last_health_check()
+            if changed:
+                self.after(0, lambda: [
+                    setattr(self, "_breached_set", bhashes),
+                    self._update_health_indicator(),
+                    self._render()
+                ])
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _update_shield_display(self, badge_color=None, badge_text=""):
         """Update the blue shield icon with a status badge overlay."""
@@ -3688,9 +4067,9 @@ def _restart_app():
     except: sys.exit(0)
 
 def _centre_on_parent(win, parent, w, h):
-    win.withdraw()
+    win.attributes("-alpha", 0)  # invisible during setup
     try:
-        parent.update_idletasks(); win.update_idletasks()
+        parent.update_idletasks()
         px=parent.winfo_rootx(); py=parent.winfo_rooty()
         pw_=parent.winfo_width(); ph=parent.winfo_height()
         x = px + (pw_-w)//2; y = py + (ph-h)//2
@@ -3698,35 +4077,50 @@ def _centre_on_parent(win, parent, w, h):
     except:
         sw=win.winfo_screenwidth(); sh=win.winfo_screenheight()
         x=(sw-w)//2; y=(sh-h)//2
-    win.geometry(f"{w}x{h}+{x}+{y}"); win.deiconify(); win.lift(); win.focus_force()
+    win.geometry(f"{w}x{h}+{x}+{y}")
+    win.update_idletasks()
+    _apply_dwm_to_widget(win)
+    win.attributes("-alpha", 1.0)  # reveal
+    win.lift(); win.focus_force()
 
 def _apply_dwm_to_widget(widget):
+    """Apply dark/themed title bar using FindWindowW (most reliable)."""
+    if sys.platform != "win32": return
     try:
-        GA_ROOT=2; inner=widget.winfo_id()
-        hwnd = ctypes.windll.user32.GetAncestor(inner, GA_ROOT)
-        if not hwnd: hwnd = inner
-        _apply_dwm_dark_titlebar(hwnd)
+        widget.update_idletasks()
+        hwnd = None
+        # FindWindowW by title — works for ALL window types
+        title = ""
+        try: title = widget.title()
+        except: pass
+        if title:
+            hwnd = ctypes.windll.user32.FindWindowW(None, title)
+        # Fallback: GetAncestor
+        if not hwnd:
+            hwnd = ctypes.windll.user32.GetAncestor(widget.winfo_id(), 2)
+        if hwnd:
+            _apply_dwm_dark_titlebar(hwnd)
     except: pass
 
 def _apply_dwm_dark_titlebar(hwnd):
     palette = _ALL_PALETTES.get(_CURRENT_THEME, _DARK_PALETTE)
+    dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
+    # Dark mode (try attr 20, then 19)
+    dark = ctypes.c_int(palette.get("_dwm_dark", 1))
+    for a in (20, 19):
+        try:
+            if dwm(hwnd, a, ctypes.byref(dark), 4) == 0: break
+        except: pass
+    # Caption color (attr 35)
     try:
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, 20, ctypes.byref(ctypes.c_int(palette["_dwm_dark"])),
-            ctypes.sizeof(ctypes.c_int))
+        r, g, b = palette.get("_dwm_r",8), palette.get("_dwm_g",8), palette.get("_dwm_b",26)
+        dwm(hwnd, 35, ctypes.byref(ctypes.c_int(r|(g<<8)|(b<<16))), 4)
     except: pass
-    try:
-        r,g,b = palette["_dwm_r"], palette["_dwm_g"], palette["_dwm_b"]
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, 35, ctypes.byref(ctypes.c_int(r|(g<<8)|(b<<16))),
-            ctypes.sizeof(ctypes.c_int))
-    except: pass
+    # Text color (attr 36)
     try:
         tc = TEXT.lstrip("#")
         r2,g2,b2 = int(tc[0:2],16), int(tc[2:4],16), int(tc[4:6],16)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, 36, ctypes.byref(ctypes.c_int(r2|(g2<<8)|(b2<<16))),
-            ctypes.sizeof(ctypes.c_int))
+        dwm(hwnd, 36, ctypes.byref(ctypes.c_int(r2|(g2<<8)|(b2<<16))), 4)
     except: pass
 
 
@@ -3735,6 +4129,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("MARAi"); self.configure(bg=BG)
+        _setup_ttk_theme()
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w = max(1100, min(int(sw*0.80), 1500))
         h = max(680, min(int(w*0.6), sh-80))
@@ -3776,6 +4171,7 @@ class App(tk.Tk):
             lbl = tk.Label(tab, text=f" {st} {nm} ", font=("Segoe UI",9,"bold" if ia else "normal"),
                            bg=tb, fg=tf, padx=8, pady=5, cursor="hand2")
             lbl.pack(side="left"); lbl.bind("<Button-1>", lambda e, idx=i: self._switch_tab(idx))
+            Tooltip(tab, v.get("dir", ""))
             if len(self._vaults)>1:
                 xl = tk.Label(tab, text="\u2715", font=("Segoe UI",8), bg=tb,
                               fg="white" if ia else MUTED, padx=4, pady=5, cursor="hand2")

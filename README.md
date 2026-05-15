@@ -8,72 +8,67 @@ MARAi is a zero-cloud, single-file password manager built with Python and tkinte
 
 ### Vault Security
 - **AES-256-GCM** encryption with **Argon2id** key derivation (falls back to PBKDF2)
-- **3-minute auto-lock** with live countdown timer — resets on any mouse/keyboard activity
+- **3-minute auto-lock** with live countdown — resets on activity
 - **Clipboard history exclusion** on Windows — passwords don't appear in Win+V
-- **Auto-clear clipboard** after 30 seconds (90 seconds for AVD connections)
-- Master password change without re-encrypting individual entries
+- **Auto-clear clipboard** with live countdown (30s standard, 90s for AVD)
+- Master password change without re-encrypting entries
+
+### 🛡 Vault Health Dashboard
+- **Breach detection** via Have I Been Pwned (k-anonymity — only 5 chars of SHA-1 hash sent)
+- **Weak password detection** — flags anything below "Strong"
+- **Reused password detection** — flags entries sharing the same password
+- **Stale password detection** — entries not updated in 90+ days
+- **Auto-check on launch** — optional toggle for automatic breach checks
+- **Live shield indicator** — green ✓, amber !, or red count in toolbar
+- **Health filter** — single click to show only entries with issues
+- **Breach persistence** — results saved across sessions, cards highlighted until fixed
 
 ### 12 Entry Categories
-Each category has a tailored form with relevant fields:
-
 | Category | Key Fields |
 |---|---|
 | Password | Username, password, URL |
-| Bank Account | IFSC, Customer ID, App PIN, Profile Password |
+| Bank Account | IFSC, Customer ID, Net Banking, App PIN, Profile Password |
 | Credit Card | Card number, expiry, CVV, PIN, card type |
-| Email Account | IMAP/SMTP servers, recovery email/phone |
+| Email Account | IMAP/SMTP, recovery email/phone |
 | Domain Credential | Domain, username, password — linkable to servers |
-| Server / RDP | Host, port, AVD workspace URL, linked credential |
-| SSH Key | Host, port, passphrase, private/public key |
+| Server / RDP | Host, port, AVD workspace, linked credential |
+| SSH Key | Host, passphrase, private/public key |
 | Secure Note | Free-form encrypted text |
 | Identity | ID type/number, issuing authority, dates |
 | Wi-Fi Password | SSID, security type, router credentials |
-| Software License | License key, version, purchase/expiry dates |
+| Software License | License key, version, purchase/expiry |
 | Other | Flexible username/password/URL |
 
+All categories support **custom fields** — add any name:value pairs.
+
 ### Domain Credential Linking
-Create a **Domain Credential** entry for shared org accounts, then link multiple **Server / RDP** entries to it. Change the password once — all linked servers use the updated credential automatically.
+Create a Domain Credential, then link Server / RDP entries to it. Change the password once — all linked servers use the updated credential.
 
 ### Brand Icon System
-- **150+ brand domains** mapped — banks, tech, fintech, entertainment, shopping
-- Covers Indian banks (SBI, HDFC, ICICI, Axis, Kotak), international banks, and major services
-- **Smart lookup**: entry name → word splitting → bank_name field → URL → domain heuristic
-- **3-source fetch**: Google Favicons → DuckDuckGo → direct favicon.ico
-- **Pillow LANCZOS** resizing at 64px/40px with automatic white background removal
-- **Disk cache** at `~/.marai/icons/` — offline after first fetch
-- **Custom icon upload** — pick any PNG/GIF per entry
+- **150+ brands** — banks, tech, fintech, entertainment, shopping, Indian utilities
+- Smart matching: longest match wins, short brands need word match
+- 3-source fetch: Google Favicons → DuckDuckGo → direct favicon.ico
+- Pillow LANCZOS resizing, white background removal, disk cache
+- Custom icon upload per entry
 
 ### 10 Themes with Per-Vault Support
-Each vault can have its own theme. Switch tabs and the entire UI transforms.
+Dark, Emerald, Ocean, Mocha, Neon, Ferrari, Sage Green, Rose, Amber, Mint — each vault remembers its own theme.
 
-**Dark themes:** Dark (indigo), Emerald (green), Ocean (cyan), Mocha (brown), Neon (hot pink)
-
-**Light themes:** Ferrari (red), Sage Green, Rose (pink), Amber (gold), Mint (teal)
-
-### Multi-Vault Tabs
-- Open multiple vaults side-by-side in tabs
-- Each vault has its own lock screen, theme, and auto-lock timer
-- **Tabs persist across restarts** — no need to re-add every time
-- Add vaults from any directory (portable/USB friendly)
+### Adaptive Layout
+- **Column chooser** — `◀ 3 columns ▶` adjusts from list (1 col) to dense grid (6 cols)
+- Adaptive card height, saved in config
+- Full-text search with 250ms debounce
+- Work/Personal context toggles
+- Category filter
 
 ### RDP & AVD Connections
-- **Standard RDP**: credentials passed via Windows Credential Manager (`CredWriteW`) — password never touches clipboard. Auto-cleaned after 10 seconds.
-- **Azure Virtual Desktop**: password copied securely to clipboard with 90-second timer for double-paste MFA flows
-- Connect buttons show **▶ AVD** or **▶ RDP** based on entry type
-- **Connection Label** field — distinguish "Production", "Dev", "UAT" at a glance
-
-### Views & Zoom
-- **4 view modes**: List (single-line rows), Small (icon grid), Medium, Large
-- **Zoom controls** (60%–180%) — adjust card and icon sizes
-- **Move buttons** (▲▼) on all views for manual entry reordering
-- **Work/Personal** multi-select toggles — filter by context without losing the other
-- **Category filter** — quick-filter by any of the 12 entry types
-- Full-text search across all fields
+- **Standard RDP**: credentials via Windows Credential Manager — never touches clipboard
+- **Azure Virtual Desktop**: 90-second clipboard timer for double-paste MFA
+- Connection labels for Production/Dev/UAT
 
 ### Import, Export & Backup
-- **Export** as JSON or CSV — compatible with other password managers
-- **Import** from JSON or CSV with automatic format detection
-- **Encrypted backup** — timestamped folder with vault files and manifest
+- JSON/CSV export and import
+- Encrypted timestamped backup with reminder (⚠ after 7 days)
 
 ## Installation
 
@@ -85,21 +80,16 @@ Each vault can have its own theme. Switch tabs and the entire UI transforms.
 ```bash
 pip install cryptography pyperclip Pillow
 pip install argon2-cffi  # optional, recommended
-
 python marai.py
 ```
 
 ### Windows executable
-Download `MARAi.exe` from the [latest release](https://github.com/ManPlate/Marai/releases) — no Python needed.
+Download `MARAi.exe` from the [latest release](https://github.com/ManPlate/Marai/releases).
 
-### Build your own .exe
+### Build .exe
 ```bash
-pip install pyinstaller
 pyinstaller --onefile --windowed --icon=marai.ico --name=MARAi marai.py
 ```
-
-### Portable mode
-Place `MARAi.exe` or `marai.py` on a USB drive. The vault stores next to the executable.
 
 ## Dependencies
 
@@ -107,19 +97,18 @@ Place `MARAi.exe` or `marai.py` on a USB drive. The vault stores next to the exe
 |---|---|---|
 | `cryptography` | Yes | AES-GCM encryption |
 | `pyperclip` | Yes | Cross-platform clipboard |
-| `Pillow` | Yes | High-quality icon resizing |
+| `Pillow` | Yes | Icon resizing, shield/eye rendering |
 | `argon2-cffi` | Optional | Stronger key derivation (Argon2id) |
 
 ## Data Storage
-
-All data is stored locally:
 
 ```
 ~/.marai/
 ├── config.json        # Settings, themes, vault tabs
 ├── meta.json          # Salt + verification hash
 ├── vault.enc          # AES-256-GCM encrypted vault
-└── icons/             # Cached brand icons (PNG)
+├── breached.txt       # SHA-1 hashes of breached passwords
+└── icons/             # Cached brand icons
 ```
 
 Nothing is sent anywhere. No analytics, no cloud sync, no accounts.
@@ -130,4 +119,4 @@ See [LICENSE](LICENSE) for details.
 
 ---
 
-**Built by [ManPlate](https://github.com/ManPlate)** — contributions and feedback welcome.
+**Built by [ManPlate](https://github.com/ManPlate)**
