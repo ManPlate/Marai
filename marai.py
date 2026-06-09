@@ -23,8 +23,22 @@ _CONFIG_LOCK = threading.RLock()  # protects config file read/write across threa
 import webbrowser, subprocess, ctypes, sys, datetime, csv, io, shutil
 import time as _time
 
+# QR code generation (optional)
+try:
+    import qrcode as _qr
+    _QR_OK = True
+except ImportError:
+    _QR_OK = False
+
+# TOTP 2FA (optional)
+try:
+    import pyotp as _pyotp
+    _TOTP_OK = True
+except ImportError:
+    _TOTP_OK = False
+
 # == Version ================================================================
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 CHANGELOG = [
     ("4.1.0", "Windows DPI awareness, custom ttk dark theme, entry focus effects, "
               "FindWindowW DWM for all dialogs, alpha-transparent dialog positioning, "
@@ -1236,6 +1250,27 @@ def _show_theme_picker(parent, on_apply):
     picker.after(50, lambda: _apply_dwm_to_widget(picker))
 
 # == UI Helpers =============================================================
+def _generate_wifi_qr(ssid, password, security="WPA"):
+    """Generate a Wi-Fi QR code as a PhotoImage."""
+    if not _QR_OK or not _PIL_OK: return None
+    wifi_str = f"WIFI:T:{security};S:{ssid};P:{password};;"
+    qr = _qr.QRCode(version=1, error_correction=_qr.constants.ERROR_CORRECT_M,
+                     box_size=6, border=2)
+    qr.add_data(wifi_str); qr.make(fit=True)
+    img = qr.make_image(fill_color="white", back_color="#1a1a2e").convert("RGBA")
+    return _PILImageTk.PhotoImage(img)
+
+def _generate_totp_code(secret):
+    """Generate current TOTP code from a base32 secret."""
+    if not _TOTP_OK: return None, 0
+    try:
+        secret = secret.strip().replace(" ", "").upper()
+        totp = _pyotp.TOTP(secret)
+        code = totp.now()
+        remaining = totp.interval - (datetime.datetime.now().timestamp() % totp.interval)
+        return code, int(remaining)
+    except: return None, 0
+
 def _make_eye_images(size=18):
     """Create open and closed eye images using Pillow."""
     if not _PIL_OK: return None, None
@@ -1353,6 +1388,317 @@ def mk_scrollbar(parent, **kw):
 # == Scroll Router ==========================================================
 
 # == Secure Clipboard ======================================================
+def _make_type_btn(parent, idx, vault_app, card_bg, font_size=9, has_user=True, has_pw=True):
+    """Two small type buttons: [⌨ Both] [🔑 PW]  (or just one if only pw/user exists).
+    No dropdown — two direct actions, clearly labelled, easy to hit.
+    Clipboard is never touched upfront; it only activates as a fallback if typing fails."""
+    frame = tk.Frame(parent, bg=card_bg)
+
+    def _btn(text, cmd):
+        # Use theme-aware colors with a visible border so buttons stand out on any theme
+        b = tk.Button(frame, text=text,
+                      font=("Segoe UI", font_size, "bold"),
+                      bg=SURFACE2, fg=TEXT,
+                      activebackground=ACCENT, activeforeground="white",
+                      relief="flat", cursor="hand2",
+                      highlightbackground=BORDER, highlightthickness=1,
+                      bd=0, padx=7, pady=3, command=cmd)
+        b.bind("<Enter>", lambda e: b.config(bg=ACCENT, fg="white",  highlightbackground=ACCENT))
+        b.bind("<Leave>", lambda e: b.config(bg=SURFACE2, fg=TEXT,   highlightbackground=BORDER))
+        b.pack(side="left", padx=(0, 3))
+        return b
+
+    if has_user and has_pw:
+        _btn("⌨ Both", lambda: vault_app._auto_type_entry(idx, mode="all"))
+    if has_pw:
+        _btn("🔑 PW",   lambda: vault_app._auto_type_entry(idx, mode="password"))
+    elif has_user:
+        _btn("👤 User", lambda: vault_app._auto_type_entry(idx, mode="username"))
+
+    return frame
+
+
+def _rsa_wait_for_trigger(root, on_click):
+    """Wait for user to signal that the AVD second password prompt is visible.
+    Two parallel methods — whichever fires first wins:
+      1. Ctrl+F12 hotkey  (works while AVD is fullscreen/focused)
+      2. MARAi restores with a big visible button  (click when you see it)
+    """
+    import ctypes as _ct
+
+    fired = threading.Event()
+
+    def _fire():
+        if fired.is_set(): return
+        fired.set()
+        on_click()
+
+    # --- Method 1: poll Ctrl+F12 via GetAsyncKeyState ---
+    VK_F12       = 0x7B
+    VK_CONTROL   = 0x11
+    def _hotkey_poll():
+        while not fired.is_set():
+            ctrl = _ct.windll.user32.GetAsyncKeyState(VK_CONTROL) & 0x8000
+            f12  = _ct.windll.user32.GetAsyncKeyState(VK_F12)     & 0x8001
+            if ctrl and f12:
+                root.after(0, _fire)
+                return
+            _time.sleep(0.05)
+    threading.Thread(target=_hotkey_poll, daemon=True).start()
+
+    # --- Method 2: restore MARAi, show a big button ---
+    def _show_button():
+        if fired.is_set(): return
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+
+        # Overlay a full-width prompt banner at the top of MARAi
+        banner = tk.Frame(root, bg="#e8a020", height=64)
+        banner.place(relx=0, rely=0, relwidth=1, y=0)
+        banner.lift()
+
+        lbl = tk.Label(banner,
+                       text="📱  Approve RSA on your phone — then click here or press Ctrl+F12",
+                       font=("Segoe UI", 12, "bold"),
+                       bg="#e8a020", fg="white", cursor="hand2")
+        lbl.pack(fill="both", expand=True, padx=16)
+
+        def _banner_fire(e=None):
+            banner.destroy()
+            root.iconify()
+            _fire()
+
+        banner.bind("<Button-1>", _banner_fire)
+        lbl.bind("<Button-1>",    _banner_fire)
+
+        # Auto-dismiss banner if hotkey fires
+        def _watch():
+            while not fired.is_set():
+                _time.sleep(0.1)
+            root.after(0, lambda: banner.destroy() if banner.winfo_exists() else None)
+        threading.Thread(target=_watch, daemon=True).start()
+
+    root.after(0, _show_button)
+
+
+def _focus_avd_prompt(keywords=None):
+    """Find a window matching keywords and aggressively bring it to the foreground
+    using AttachThreadInput so SendInput reliably reaches it.
+    Returns hwnd on success, None if not found."""
+    if sys.platform != "win32": return None
+    import ctypes as _ct
+    user32    = _ct.windll.user32
+    kernel32  = _ct.windll.kernel32
+
+    if keywords is None:
+        keywords = ["windows security", "credential dialog", "sign in",
+                    "windows app", "azure virtual desktop", "remote desktop", "avd"]
+
+    candidates = {}
+    EnumProc = _ct.WINFUNCTYPE(_ct.c_bool, _ct.c_size_t, _ct.c_size_t)
+    @EnumProc
+    def _cb(hwnd, _):
+        if not user32.IsWindowVisible(hwnd): return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n < 2: return True
+        buf = _ct.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        title = buf.value.lower()
+        for i, kw in enumerate(keywords):
+            if kw in title and i not in candidates:
+                candidates[i] = hwnd
+        return True
+    user32.EnumWindows(_cb, 0)
+    if not candidates: return None
+
+    hwnd = candidates[min(candidates)]
+    user32.ShowWindow(hwnd, 9)      # SW_RESTORE
+    _time.sleep(0.2)
+
+    # AttachThreadInput: attach calling thread's input queue to target window's thread
+    # This is the reliable way to force focus when SetForegroundWindow alone fails
+    cur_tid    = kernel32.GetCurrentThreadId()
+    target_tid = user32.GetWindowThreadProcessId(hwnd, None)
+    attached   = False
+    try:
+        if cur_tid != target_tid:
+            user32.AttachThreadInput(cur_tid, target_tid, True)
+            attached = True
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetFocus(hwnd)
+    except Exception:
+        pass
+    finally:
+        if attached:
+            user32.AttachThreadInput(cur_tid, target_tid, False)
+
+    _time.sleep(0.4)
+    return hwnd
+
+
+def _rsa_approve_desktop(wait_for_popup=5):
+    """Find the RSA SecurID Authenticate app on this Windows PC and click Approve.
+    Searches for the window for up to wait_for_popup seconds.
+    Returns True if Approve was clicked, False if app not found."""
+    if sys.platform != "win32": return False
+    import ctypes
+    user32 = ctypes.windll.user32
+
+    # Window title fragments used by RSA SecurID Authenticate (UWP + Win32 variants)
+    RSA_TITLES = [
+        "rsa securid", "securid authenticate", "rsa authentication",
+        "authentication request", "rsa authenticate", "approve"
+    ]
+
+    def _find_rsa_hwnd():
+        found = [None]
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_size_t, ctypes.c_size_t)
+        @EnumWindowsProc
+        def _cb(hwnd, _):
+            if not user32.IsWindowVisible(hwnd): return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n < 3: return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            title = buf.value.lower()
+            if any(kw in title for kw in RSA_TITLES):
+                found[0] = hwnd; return False
+            return True
+        user32.EnumWindows(_cb, 0)
+        return found[0]
+
+    def _find_approve_child(parent_hwnd):
+        """Enumerate child controls looking for a button labelled Approve."""
+        found = [None]
+        EnumChildProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_size_t, ctypes.c_size_t)
+        @EnumChildProc
+        def _cb(hwnd, _):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n < 2: return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if "approve" in buf.value.lower():
+                found[0] = hwnd; return False
+            return True
+        user32.EnumChildWindows(parent_hwnd, _cb, 0)
+        return found[0]
+
+    # Poll for the RSA window — it may take a few seconds to appear after password entry
+    hwnd = None
+    deadline = _time.time() + wait_for_popup
+    while _time.time() < deadline:
+        hwnd = _find_rsa_hwnd()
+        if hwnd: break
+        _time.sleep(0.4)
+
+    if not hwnd: return False   # RSA app not running on this PC
+
+    # Bring RSA window to front
+    SW_RESTORE = 9
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    _time.sleep(0.2)
+    try: user32.SetForegroundWindow(hwnd)
+    except Exception: pass
+    _time.sleep(0.5)            # let window paint
+
+    # Try to click the Approve button directly
+    approve_hwnd = _find_approve_child(hwnd)
+    if approve_hwnd:
+        BM_CLICK = 0x00F5
+        user32.SendMessageW(approve_hwnd, BM_CLICK, 0, 0)
+    else:
+        # Fallback: send Enter — works when Approve is the default/focused button
+        import ctypes.wintypes as w
+        KEYEVENTF_KEYDOWN = 0x0000; KEYEVENTF_KEYUP = 0x0002; INPUT_KEYBOARD = 1
+        VK_RETURN = 0x0D
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [("wVk",w.WORD),("wScan",w.WORD),("dwFlags",w.DWORD),
+                        ("time",w.DWORD),("dwExtraInfo",ctypes.c_uint64)]
+        class _IU(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type",w.DWORD),("union",_IU)]
+        for flags in (KEYEVENTF_KEYDOWN, KEYEVENTF_KEYUP):
+            i = INPUT(); i.type = INPUT_KEYBOARD
+            i.union.ki.wVk = VK_RETURN; i.union.ki.dwFlags = flags
+            ctypes.windll.user32.SendInput(1, ctypes.byref(i), ctypes.sizeof(i))
+            _time.sleep(0.05)
+
+    _time.sleep(0.3)
+    return True
+
+
+def _auto_type(username="", password="", mode="all", delay_ms=30):
+    """Simulate keyboard input.
+    mode: 'all' = user+Tab+pass+Enter, 'password' = pass+Enter, 'username' = user+Tab
+    Uses SendInput with KEYEVENTF_UNICODE for reliable character input."""
+    if sys.platform != "win32": return False
+    try:
+        import ctypes, ctypes.wintypes as w
+        KEYEVENTF_KEYUP = 0x0002
+        KEYEVENTF_UNICODE = 0x0004
+        INPUT_KEYBOARD = 1
+        VK_TAB = 0x09; VK_RETURN = 0x0D
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", w.WORD), ("wScan", w.WORD),
+                ("dwFlags", w.DWORD), ("time", w.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))
+            ]
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [
+                ("dx", w.LONG), ("dy", w.LONG), ("mouseData", w.DWORD),
+                ("dwFlags", w.DWORD), ("time", w.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))
+            ]
+
+        class HARDWAREINPUT(ctypes.Structure):
+            _fields_ = [
+                ("uMsg", w.DWORD), ("wParamL", w.WORD), ("wParamH", w.WORD)
+            ]
+
+        class _INPUTunion(ctypes.Union):
+            _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", w.DWORD), ("union", _INPUTunion)]
+
+        def _key_down(vk=0, scan=0, flags=0):
+            i = INPUT(); i.type = INPUT_KEYBOARD
+            i.union.ki.wVk = vk; i.union.ki.wScan = scan
+            i.union.ki.dwFlags = flags; i.union.ki.time = 0
+            i.union.ki.dwExtraInfo = None
+            ctypes.windll.user32.SendInput(1, ctypes.byref(i), ctypes.sizeof(i))
+
+        def _type_char(ch):
+            c = ord(ch)
+            _key_down(scan=c, flags=KEYEVENTF_UNICODE)
+            _key_down(scan=c, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+            _time.sleep(delay_ms / 1000)
+
+        def _press_vk(vk):
+            _key_down(vk=vk)
+            _time.sleep(0.02)
+            _key_down(vk=vk, flags=KEYEVENTF_KEYUP)
+
+        if mode in ("all", "username") and username:
+            for ch in username: _type_char(ch)
+            _time.sleep(0.15)
+            if mode == "all":
+                _press_vk(VK_TAB)
+                _time.sleep(0.15)
+        if mode in ("all", "password") and password:
+            for ch in password: _type_char(ch)
+            _time.sleep(0.15)
+            _press_vk(VK_RETURN)
+        return True
+    except Exception:
+        return False
+
 def _clipboard_copy_secure(value, widget=None, clear_after=30):
     """Copy value to clipboard excluding from Windows clipboard history.
     clear_after: seconds before auto-clear (0 to disable)."""
@@ -2101,6 +2447,7 @@ _CATEGORY_FIELDS = {
         ("TITLE", "name", {}),
         ("USERNAME / EMAIL", "user", {}),
         ("PASSWORD", "password", {"show": "\u25cf", "mono": True, "gen": True}),
+        ("TOTP SECRET", "totp_secret", {"show": "\u25cf", "mono": True}),
         ("URL (optional)", "url", {}),
         ("NOTES", "notes", {}),
     ],
@@ -2134,6 +2481,7 @@ _CATEGORY_FIELDS = {
         ("TITLE", "name", {}),
         ("EMAIL ADDRESS", "user", {}),
         ("PASSWORD", "password", {"show": "\u25cf", "mono": True, "gen": True}),
+        ("TOTP SECRET", "totp_secret", {"show": "\u25cf", "mono": True}),
         ("PROVIDER", "provider", {"default": "Gmail"}),
         ("IMAP SERVER", "imap", {}),
         ("SMTP SERVER", "smtp", {}),
@@ -2163,6 +2511,8 @@ _CATEGORY_FIELDS = {
         ("HOST / IP ADDRESS", "host", {}),
         ("PORT", "port", {"default": "3389", "width": 8}),
         ("AVD WORKSPACE URL", "workspace", {}),
+        ("AVD CONNECTION MODE", "avd_mode", {"type": "choice", "choices": ["Browser", "Windows App"], "default": "Browser"}),
+        ("RSA/MFA WAIT (seconds, 0=off)", "rsa_delay", {"default": "0", "width": 8}),
         ("NOTES", "notes", {}),
     ],
     "SSH Key": [
@@ -2443,6 +2793,22 @@ class EntryDialog(tk.Toplevel):
                 self._field_texts[key] = txt
                 continue
 
+            if opts.get("type") == "choice":
+                choices = opts.get("choices", [])
+                default_val = opts.get("default", choices[0] if choices else "")
+                current_val = g.get(key, default_val)
+                if current_val not in choices: current_val = default_val
+                var = tk.StringVar(value=current_val)
+                self._field_vars[key] = var
+                ch_frame = tk.Frame(self._fields_frame, bg=SURFACE)
+                ch_frame.pack(fill="x", pady=(4,10))
+                for ch in choices:
+                    tk.Radiobutton(ch_frame, text=ch, variable=var, value=ch,
+                                   font=FNT_BODY, bg=SURFACE, fg=TEXT,
+                                   selectcolor=SURFACE2, activebackground=SURFACE,
+                                   activeforeground=ACCENT).pack(side="left", padx=(0,16))
+                continue
+
             if opts.get("type") == "credential_ref":
                 # Dropdown listing all Domain Credential entries
                 cred_names = ["(none - enter manually below)"]
@@ -2604,6 +2970,312 @@ class EntryDialog(tk.Toplevel):
 
 
 # == Main Vault UI ==========================================================
+# == Browser credential importer ============================================
+
+def _browser_profiles():
+    """Return {browser_name: [profile_paths]} for all detected Chromium browsers."""
+    if sys.platform != "win32":
+        return {}
+    la = os.environ.get("LOCALAPPDATA", "")
+    ap = os.environ.get("APPDATA", "")
+    ROOTS = [
+        ("Google Chrome",  os.path.join(la, "Google",        "Chrome",           "User Data")),
+        ("Microsoft Edge", os.path.join(la, "Microsoft",     "Edge",             "User Data")),
+        ("Brave",          os.path.join(la, "BraveSoftware", "Brave-Browser",    "User Data")),
+        ("Vivaldi",        os.path.join(la, "Vivaldi",       "User Data")),
+        ("Opera",          os.path.join(ap, "Opera Software","Opera Stable")),
+        ("Opera GX",       os.path.join(ap, "Opera Software","Opera GX Stable")),
+        ("Chromium",       os.path.join(la, "Chromium",      "User Data")),
+    ]
+    found = {}
+    for name, root in ROOTS:
+        if not os.path.isdir(root):
+            continue
+        profiles = []
+        for sub in ["Default"] + [f"Profile {i}" for i in range(1, 10)]:
+            p = os.path.join(root, sub, "Login Data")
+            if os.path.isfile(p):
+                profiles.append((sub, p, root))
+        if profiles:
+            found[name] = profiles
+    return found
+
+
+def _dpapi_decrypt(data):
+    """Decrypt bytes using Windows DPAPI CryptUnprotectData."""
+    import ctypes, ctypes.wintypes
+    class _BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char))]
+    buf  = ctypes.create_string_buffer(data, len(data))
+    blob_in  = _BLOB(len(data), buf)
+    blob_out = _BLOB()
+    ok = ctypes.windll.crypt32.CryptUnprotectData(
+        ctypes.byref(blob_in), None, None, None, None, 0,
+        ctypes.byref(blob_out))
+    if not ok:
+        raise RuntimeError("DPAPI decrypt failed")
+    result = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+    return result
+
+
+def _get_chrome_key(user_data_root):
+    """Extract and decrypt the AES master key from Chrome Local State."""
+    local_state = os.path.join(user_data_root, "Local State")
+    if not os.path.isfile(local_state):
+        return None
+    with open(local_state, encoding="utf-8") as f:
+        state = json.load(f)
+    enc_key_b64 = state.get("os_crypt", {}).get("encrypted_key")
+    if not enc_key_b64:
+        return None
+    enc_key = base64.b64decode(enc_key_b64)
+    if enc_key[:5] != b"DPAPI":
+        return None
+    return _dpapi_decrypt(enc_key[5:])   # raw 32-byte AES key
+
+
+def _decrypt_chrome_password(enc_value, aes_key):
+    """Decrypt a Chrome password_value field."""
+    if not enc_value:
+        return ""
+    try:
+        if enc_value[:3] in (b"v10", b"v11"):
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            nonce      = enc_value[3:15]
+            ciphertext = enc_value[15:]
+            return AESGCM(aes_key).decrypt(nonce, ciphertext, None).decode("utf-8", errors="replace")
+        else:
+            return _dpapi_decrypt(enc_value).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _read_browser_logins(login_data_path, user_data_root):
+    """Read and decrypt all logins from a Chrome Login Data SQLite file.
+    Returns list of {url, username, password}."""
+    import sqlite3, shutil, tempfile
+    aes_key = _get_chrome_key(user_data_root)
+    # Copy DB to temp (browser may have it locked)
+    tmp = tempfile.mktemp(suffix=".db")
+    try:
+        shutil.copy2(login_data_path, tmp)
+        con = sqlite3.connect(tmp)
+        rows = con.execute(
+            "SELECT origin_url, username_value, password_value FROM logins"
+            " WHERE blacklisted_by_user=0 ORDER BY origin_url"
+        ).fetchall()
+        con.close()
+    finally:
+        try: os.remove(tmp)
+        except: pass
+
+    results = []
+    for url, user, enc_pw in rows:
+        pw = _decrypt_chrome_password(enc_pw, aes_key) if aes_key else ""
+        if url or user:
+            results.append({"url": url, "username": user, "password": pw})
+    return results
+
+
+class BrowserImportDialog(tk.Toplevel):
+    """Multi-step dialog: pick browser → pick profile → select credentials → import."""
+
+    def __init__(self, parent, vault, on_import):
+        super().__init__(parent)
+        self._vault   = vault
+        self._on_import = on_import
+        self.title("Import from Browser")
+        self.configure(bg=SURFACE)
+        self.resizable(True, True)
+        w, h = 700, 520
+        sx = parent.winfo_rootx() + (parent.winfo_width()  - w) // 2
+        sy = parent.winfo_rooty() + (parent.winfo_height() - h) // 2
+        self.geometry(f"{w}x{h}+{sx}+{sy}")
+        self.grab_set()
+        self._profiles = _browser_profiles()
+        self._step_pick_browser()
+
+    # ── Step 1: choose browser ──────────────────────────────────────────────
+    def _step_pick_browser(self):
+        self._clear()
+        tk.Label(self, text="Import from Browser", font=FNT_HEAD,
+                 bg=SURFACE, fg=TEXT).pack(pady=(24,4))
+        tk.Label(self, text="Choose a browser to import credentials from:",
+                 font=FNT_BODY, bg=SURFACE, fg=MUTED).pack(pady=(0,16))
+
+        if not self._profiles:
+            tk.Label(self, text="No supported browsers detected on this PC.",
+                     font=FNT_BODY, bg=SURFACE, fg=RED).pack(pady=40)
+            tk.Button(self, text="Close", command=self.destroy,
+                      font=FNT_SM, bg=SURFACE2, fg=TEXT, relief="flat",
+                      cursor="hand2", padx=16, pady=6).pack()
+            return
+
+        grid = tk.Frame(self, bg=SURFACE)
+        grid.pack(pady=8)
+        ICONS = {"Google Chrome": "🔴", "Microsoft Edge": "🔵",
+                 "Brave": "🦄", "Opera": "🟠", "Opera GX": "🎮",
+                 "Vivaldi": "🟣", "Chromium": "⚪"}
+        for col, (name, profiles) in enumerate(self._profiles.items()):
+            total = sum(1 for _ in profiles)
+            icon = ICONS.get(name, "🌐")
+            lbl = f"{icon}\n{name}\n{total} profile{'s' if total>1 else ''}"
+            btn = tk.Button(grid, text=lbl,
+                            font=("Segoe UI", 10), bg=SURFACE2, fg=TEXT,
+                            relief="flat", cursor="hand2", padx=20, pady=14, width=12,
+                            highlightbackground=BORDER, highlightthickness=1,
+                            command=lambda n=name: self._step_pick_profile(n))
+            btn.bind("<Enter>", lambda e, b=btn: b.config(bg=ACCENT, fg="white"))
+            btn.bind("<Leave>", lambda e, b=btn: b.config(bg=SURFACE2, fg=TEXT))
+            btn.grid(row=0, column=col, padx=8, pady=4)
+
+    # ── Step 2: choose profile (if >1) ─────────────────────────────────────
+    def _step_pick_profile(self, browser_name):
+        profiles = self._profiles[browser_name]
+        if len(profiles) == 1:
+            self._load_credentials(browser_name, profiles[0])
+            return
+        self._clear()
+        tk.Label(self, text=f"{browser_name} — Select Profile",
+                 font=FNT_HEAD, bg=SURFACE, fg=TEXT).pack(pady=(24,16))
+        for sub, path, root in profiles:
+            tk.Button(self, text=sub, font=FNT_BODY, bg=SURFACE2, fg=TEXT,
+                      relief="flat", cursor="hand2", padx=20, pady=8,
+                      command=lambda p=(sub,path,root): self._load_credentials(browser_name, p)
+                      ).pack(pady=4)
+        tk.Button(self, text="← Back", font=FNT_SM, bg=SURFACE2, fg=MUTED,
+                  relief="flat", cursor="hand2", padx=12, pady=4,
+                  command=self._step_pick_browser).pack(pady=(12,0))
+
+    # ── Step 3: select credentials ──────────────────────────────────────────
+    def _load_credentials(self, browser_name, profile_tuple):
+        self._clear()
+        tk.Label(self, text="Loading…", font=FNT_BODY, bg=SURFACE, fg=MUTED).pack(pady=60)
+        self.update_idletasks()
+        sub, path, root = profile_tuple
+        try:
+            logins = _read_browser_logins(path, root)
+        except Exception as ex:
+            self._clear()
+            tk.Label(self, text=f"Error reading browser data: {ex}",
+                     font=FNT_BODY, bg=SURFACE, fg=RED, wraplength=500).pack(pady=40)
+            tk.Button(self, text="← Back", font=FNT_SM, bg=SURFACE2, fg=MUTED,
+                      relief="flat", cursor="hand2", padx=12, pady=4,
+                      command=self._step_pick_browser).pack()
+            return
+        self._step_select(browser_name, sub, logins)
+
+    def _step_select(self, browser_name, profile, logins):
+        self._clear()
+        if not logins:
+            tk.Label(self, text="No saved credentials found in this profile.",
+                     font=FNT_BODY, bg=SURFACE, fg=MUTED).pack(pady=60)
+            tk.Button(self, text="← Back", font=FNT_SM, bg=SURFACE2, fg=MUTED,
+                      relief="flat", cursor="hand2", padx=12, pady=4,
+                      command=self._step_pick_browser).pack()
+            return
+
+        tk.Label(self, text=f"{browser_name}  —  {profile}",
+                 font=FNT_HEAD, bg=SURFACE, fg=TEXT).pack(pady=(16,2))
+        tk.Label(self, text=f"{len(logins)} saved credentials — tick the ones to import:",
+                 font=FNT_SM, bg=SURFACE, fg=MUTED).pack(pady=(0,8))
+
+        # Select all / none bar
+        ctrl = tk.Frame(self, bg=SURFACE)
+        ctrl.pack(fill="x", padx=20, pady=(0,6))
+        self._check_vars = [tk.BooleanVar(value=True) for _ in logins]
+        def _all(v): [c.set(v) for c in self._check_vars]
+        tk.Button(ctrl, text="Select All",  font=FNT_SM, bg=SURFACE2, fg=TEXT,
+                  relief="flat", cursor="hand2", padx=8, pady=3,
+                  command=lambda: _all(True)).pack(side="left", padx=(0,6))
+        tk.Button(ctrl, text="Select None", font=FNT_SM, bg=SURFACE2, fg=TEXT,
+                  relief="flat", cursor="hand2", padx=8, pady=3,
+                  command=lambda: _all(False)).pack(side="left")
+        # skip already-in-vault entries
+        existing_urls = {e.get("url","").rstrip("/") for e in self._vault}
+        existing_users = {(e.get("url","").rstrip("/"), e.get("user","")) for e in self._vault}
+
+        # Scrollable list
+        outer = tk.Frame(self, bg=SURFACE)
+        outer.pack(fill="both", expand=True, padx=20)
+        canvas = tk.Canvas(outer, bg=SURFACE, highlightthickness=0)
+        sb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=SURFACE)
+        cw_id = canvas.create_window((0,0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(cw_id, width=e.width))
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1*(e.delta//120), "units"))
+
+        for i, entry in enumerate(logins):
+            row = tk.Frame(inner, bg=SURFACE2 if i%2==0 else SURFACE,
+                           highlightbackground=BORDER, highlightthickness=0)
+            row.pack(fill="x", pady=1)
+            already = (entry["url"].rstrip("/"), entry["username"]) in existing_users
+            if already: self._check_vars[i].set(False)
+            cb = tk.Checkbutton(row, variable=self._check_vars[i],
+                                bg=row["bg"], fg=TEXT, selectcolor=SURFACE2,
+                                activebackground=row["bg"], relief="flat")
+            cb.pack(side="left", padx=(8,4))
+            from urllib.parse import urlparse
+            try: domain = urlparse(entry["url"]).netloc or entry["url"][:40]
+            except: domain = entry["url"][:40]
+            tk.Label(row, text=domain, font=("Segoe UI",9,"bold"),
+                     bg=row["bg"], fg=TEXT if not already else MUTED,
+                     width=28, anchor="w").pack(side="left", padx=(0,8))
+            tk.Label(row, text=entry["username"] or "(no username)",
+                     font=("Segoe UI",9), bg=row["bg"],
+                     fg=MUTED if not entry["username"] else TEXT,
+                     width=24, anchor="w").pack(side="left")
+            if already:
+                tk.Label(row, text="already in vault", font=("Segoe UI",8),
+                         bg=row["bg"], fg=MUTED).pack(side="left", padx=8)
+            elif not entry["password"]:
+                tk.Label(row, text="no password", font=("Segoe UI",8),
+                         bg=row["bg"], fg=RED).pack(side="left", padx=8)
+
+        self._logins = logins
+        # Bottom bar
+        bar = tk.Frame(self, bg=SURFACE2)
+        bar.pack(fill="x", side="bottom", pady=(8,0))
+        tk.Button(bar, text="← Back", font=FNT_SM, bg=SURFACE2, fg=MUTED,
+                  relief="flat", cursor="hand2", padx=12, pady=8,
+                  command=self._step_pick_browser).pack(side="left", padx=12)
+        tk.Button(bar, text="⬇  Import Selected", font=("Segoe UI",10,"bold"),
+                  bg=ACCENT, fg="white", activebackground=ACCENT,
+                  relief="flat", cursor="hand2", padx=16, pady=8,
+                  command=self._do_import).pack(side="right", padx=12)
+
+    def _do_import(self):
+        selected = [lg for lg, var in zip(self._logins, self._check_vars) if var.get()]
+        if not selected:
+            messagebox.showinfo("Nothing selected", "Tick at least one entry.",
+                                parent=self); return
+        from urllib.parse import urlparse
+        now_ts = datetime.datetime.now().isoformat(timespec="seconds")
+        entries = []
+        for lg in selected:
+            try: domain = urlparse(lg["url"]).netloc or lg["url"]
+            except: domain = lg["url"]
+            name = domain.replace("www.", "")
+            entries.append({
+                "name": name, "category": "Password", "type": "Password",
+                "url": lg["url"], "user": lg["username"],
+                "password": lg["password"],
+                "context": "Personal", "favourite": False,
+                "updated_at": now_ts,
+            })
+        self._on_import(entries)
+        self.destroy()
+
+    def _clear(self):
+        for w in self.winfo_children(): w.destroy()
+
+
 class Toast:
     """Slide-in notification bar with optional countdown."""
     _active = None
@@ -2770,18 +3442,25 @@ class VaultApp(tk.Frame):
             self._ctx_toggle_buttons[ctx] = b
         self._update_ctx_toggles()
 
-        # Layout control — single unified column chooser
+        # Layout control — column chooser + list view
         self._grid_cols = _load_config().get("grid_cols", 3)
         lc = tk.Frame(toolbar, bg=BG); lc.pack(side="right", padx=(10,0))
         tk.Button(lc, text="\u25c0", font=("Segoe UI",9), bg=SURFACE2, fg=TEXT,
                   relief="flat", cursor="hand2", bd=0, padx=5, pady=4,
                   command=lambda: self._set_cols(-1)).pack(side="left")
         self._cols_lbl = tk.Label(lc, text="", font=("Segoe UI",9),
-                                   fg=MUTED, bg=BG, width=8)
+                                   fg=MUTED, bg=BG, width=9)
         self._cols_lbl.pack(side="left", padx=3)
         tk.Button(lc, text="\u25b6", font=("Segoe UI",9), bg=SURFACE2, fg=TEXT,
                   relief="flat", cursor="hand2", bd=0, padx=5, pady=4,
                   command=lambda: self._set_cols(1)).pack(side="left")
+        # List view toggle — sits to the right of the ▶ (after col=6)
+        tk.Frame(lc, bg=BORDER, width=1).pack(side="left", fill="y", padx=(6,0), pady=4)
+        self._list_btn = tk.Button(lc, text="\u2261 List", font=("Segoe UI",9),
+                                   bg=SURFACE2, fg=MUTED, relief="flat",
+                                   cursor="hand2", bd=0, padx=6, pady=4,
+                                   command=lambda: self._set_cols(0))  # 0 = list
+        self._list_btn.pack(side="left", padx=(4,0))
         self._update_cols_label()
 
         # Zoom controls
@@ -2824,7 +3503,6 @@ class VaultApp(tk.Frame):
         # Content area
         content = tk.Frame(self, bg=BG); content.pack(fill="both", expand=True)
         content.grid_columnconfigure(0, weight=1)
-        content.grid_columnconfigure(1, weight=0)
         content.grid_rowconfigure(0, weight=1)
         cards_outer = tk.Frame(content, bg=BG)
         cards_outer.grid(row=0, column=0, sticky="nsew")
@@ -2871,15 +3549,22 @@ class VaultApp(tk.Frame):
             btn.config(bg=ACCENT if t==at else SURFACE2,
                        fg="white" if t==at else _cat_colors(t)[0] if t!="All" else MUTED)
     def _set_cols(self, delta):
-        self._grid_cols = max(1, min(6, self._grid_cols + delta))
+        if delta == 0:  # direct "List" button
+            self._grid_cols = 1
+        else:
+            self._grid_cols = max(1, min(6, self._grid_cols + delta))
         self._update_cols_label()
         cfg = _load_config(); cfg["grid_cols"] = self._grid_cols; _save_config(cfg)
         self._render()
     def _update_cols_label(self):
         if self._grid_cols == 1:
-            self._cols_lbl.config(text="\u2261 List")
+            self._cols_lbl.config(text="\u25a6 1 column")
+            if hasattr(self, "_list_btn"):
+                self._list_btn.config(bg=ACCENT, fg="white")
         else:
             self._cols_lbl.config(text=f"\u25a6 {self._grid_cols} columns")
+            if hasattr(self, "_list_btn"):
+                self._list_btn.config(bg=SURFACE2, fg=MUTED)
 
     def _toggle_issues_filter(self):
         if self._health_filter == "all":
@@ -2977,6 +3662,51 @@ class VaultApp(tk.Frame):
                 messagebox.showerror("Failed", str(e), parent=self.winfo_toplevel())
 
     def _import_vault(self):
+        """Show import picker: file (JSON/CSV) or directly from a browser."""
+        root = self.winfo_toplevel()
+        dlg = tk.Toplevel(root)
+        dlg.title("Import")
+        dlg.configure(bg=SURFACE)
+        dlg.resizable(False, False)
+        w, h = 380, 210
+        dlg.geometry(f"{w}x{h}+{root.winfo_rootx()+(root.winfo_width()-w)//2}"
+                     f"+{root.winfo_rooty()+(root.winfo_height()-h)//2}")
+        dlg.grab_set()
+
+        tk.Label(dlg, text="Import Credentials", font=FNT_HEAD,
+                 bg=SURFACE, fg=TEXT).pack(pady=(20,4))
+        tk.Label(dlg, text="Where would you like to import from?",
+                 font=FNT_SM, bg=SURFACE, fg=MUTED).pack(pady=(0,20))
+
+        btn_row = tk.Frame(dlg, bg=SURFACE)
+        btn_row.pack()
+
+        def _from_file():
+            dlg.destroy()
+            self._import_from_file()
+
+        def _from_browser():
+            dlg.destroy()
+            self._import_from_browser()
+
+        for txt, icon, cmd in [
+            ("JSON / CSV File", "\U0001f4c2", _from_file),
+            ("Browser",         "\U0001f310", _from_browser),
+        ]:
+            b = tk.Button(btn_row, text=f"{icon}  {txt}",
+                          font=("Segoe UI", 10), bg=SURFACE2, fg=TEXT,
+                          relief="flat", cursor="hand2", padx=20, pady=14, width=13,
+                          highlightbackground=BORDER, highlightthickness=1,
+                          command=cmd)
+            b.bind("<Enter>", lambda e, btn=b: btn.config(bg=ACCENT, fg="white"))
+            b.bind("<Leave>", lambda e, btn=b: btn.config(bg=SURFACE2, fg=TEXT))
+            b.pack(side="left", padx=12)
+
+        tk.Button(dlg, text="Cancel", font=FNT_SM, bg=SURFACE2, fg=MUTED,
+                  relief="flat", cursor="hand2", padx=12, pady=4,
+                  command=dlg.destroy).pack(pady=(16,0))
+
+    def _import_from_file(self):
         from tkinter import filedialog
         path = filedialog.askopenfilename(title="Import",
             filetypes=[("All supported","*.json *.csv"),("JSON","*.json"),("CSV","*.csv")],
@@ -2999,14 +3729,27 @@ class VaultApp(tk.Frame):
         if not valid:
             messagebox.showinfo("Import","No valid entries found.",parent=self.winfo_toplevel()); return
         if not messagebox.askyesno("Import",f"Import {len(valid)} entries?",parent=self.winfo_toplevel()): return
+        self._finish_import(valid)
+
+    def _import_from_browser(self):
+        def _on_import(entries):
+            count = len(entries)
+            self._finish_import(entries)
+            Toast.show(self.winfo_toplevel(), f"\u2705 {count} credentials imported from browser",
+                       GREEN, 3000)
+        BrowserImportDialog(self.winfo_toplevel(), self.vault, _on_import)
+
+    def _finish_import(self, entries):
         now_ts = datetime.datetime.now().isoformat(timespec="seconds")
-        for e in valid:
-            e.setdefault("type",e.get("category","Password"))
-            e.setdefault("category",e.get("type","Password"))
-            e.setdefault("context","Personal"); e.setdefault("updated_at",now_ts)
-            e.setdefault("favourite",False); self.vault.insert(0,e)
-        self._save_vault(); self._render()
-        messagebox.showinfo("Done",f"\u2705 {len(valid)} entries imported.",parent=self.winfo_toplevel())
+        for e in entries:
+            e.setdefault("type", e.get("category","Password"))
+            e.setdefault("category", e.get("type","Password"))
+            e.setdefault("context","Personal"); e.setdefault("updated_at", now_ts)
+            e.setdefault("favourite", False); self.vault.insert(0, e)
+        self._save_vault(); self._issues_dirty = True; self._render()
+        if not any(isinstance(w, BrowserImportDialog) for w in self.winfo_toplevel().winfo_children()):
+            messagebox.showinfo("Done", f"\u2705 {len(entries)} entries imported.",
+                                parent=self.winfo_toplevel())
 
     def _backup_vault(self):
         from tkinter import filedialog
@@ -3032,6 +3775,40 @@ class VaultApp(tk.Frame):
         except Exception as e:
             messagebox.showerror("Failed",str(e),parent=self.winfo_toplevel())
 
+    def _rebuild_issues_cache(self):
+        """Rebuild entry health issues. Called only when vault data changes."""
+        import hashlib as _hl
+        file_set = _get_breached_hashes()
+        if not hasattr(self, "_breached_set") or not self._breached_set:
+            self._breached_set = file_set
+        elif file_set:
+            self._breached_set = self._breached_set | file_set
+        self._entry_issues = {}
+        pw_map = {}
+        for i, entry in enumerate(self.vault):
+            pw = entry.get("password","")
+            if not pw: continue
+            issues = []
+            h = _hl.sha1(pw.encode("utf-8")).hexdigest().upper()
+            if h in self._breached_set: issues.append("breached")
+            label, _, _ = password_strength(pw)
+            if label in ("Weak","Fair"): issues.append("weak")
+            ts = entry.get("updated_at","")
+            if ts:
+                try:
+                    days = (datetime.datetime.now() - datetime.datetime.fromisoformat(ts)).days
+                    if days > 90: issues.append("old")
+                except: pass
+            if pw not in pw_map: pw_map[pw] = []
+            pw_map[pw].append(i)
+            if issues: self._entry_issues[i] = issues
+        for pw, indices in pw_map.items():
+            if len(indices) > 1:
+                for i in indices:
+                    if i not in self._entry_issues: self._entry_issues[i] = []
+                    if "reused" not in self._entry_issues[i]:
+                        self._entry_issues[i].append("reused")
+
     def _first_render(self):
         """Initial render — blocks resize-triggered re-renders."""
         self._render()
@@ -3054,45 +3831,16 @@ class VaultApp(tk.Frame):
                 return  # don't retry if we've already rendered once
             self.after(100, self._render)
             return
+        # Hide cards window while rebuilding — prevents incremental repaint flicker
+        self.canvas.itemconfig(self._cw, state="hidden")
         self.cards_frame.unbind("<Configure>")
         for w in self.cards_frame.winfo_children(): w.destroy()
         self.pw_visible.clear()
-        # Merge stored breaches with in-memory set (never lose in-memory data)
-        file_set = _get_breached_hashes()
-        if not hasattr(self, "_breached_set") or not self._breached_set:
-            self._breached_set = file_set
-        elif file_set:
-            self._breached_set = self._breached_set | file_set
-        # Build password health issues cache: idx -> list of issue labels
-        import hashlib as _hl
-        self._entry_issues = {}
-        pw_map = {}  # password -> list of indices
-        for i, entry in enumerate(self.vault):
-            pw = entry.get("password","")
-            if not pw: continue
-            issues = []
-            # Breached
-            h = _hl.sha1(pw.encode("utf-8")).hexdigest().upper()
-            if h in self._breached_set: issues.append("breached")
-            # Weak
-            label, _, _ = password_strength(pw)
-            if label in ("Weak","Fair"): issues.append("weak")
-            # Old
-            ts = entry.get("updated_at","")
-            if ts:
-                try:
-                    days = (datetime.datetime.now() - datetime.datetime.fromisoformat(ts)).days
-                    if days > 90: issues.append("old")
-                except: pass
-            if pw not in pw_map: pw_map[pw] = []
-            pw_map[pw].append(i)
-            if issues: self._entry_issues[i] = issues
-        for pw, indices in pw_map.items():
-            if len(indices) > 1:
-                for i in indices:
-                    if i not in self._entry_issues: self._entry_issues[i] = []
-                    if "reused" not in self._entry_issues[i]:
-                        self._entry_issues[i].append("reused")
+        # Use cached issues if available (rebuilt only when vault data changes)
+        if not hasattr(self, "_issues_dirty"): self._issues_dirty = True
+        if self._issues_dirty:
+            self._rebuild_issues_cache()
+            self._issues_dirty = False
         # Fully reset ALL grid row/column configs to prevent ghost sizing from previous view
         for _r in range(200): self.cards_frame.grid_rowconfigure(_r, weight=0, minsize=0)
         for _c in range(6): self.cards_frame.grid_columnconfigure(_c, weight=0, minsize=0, uniform="")
@@ -3109,8 +3857,8 @@ class VaultApp(tk.Frame):
         # Apply health filter (overrides category/context when active)
         hf = getattr(self, "_health_filter", "all")
         if hf == "issues":
-            filtered = [e for e in self.vault
-                        if self._entry_issues.get(self.vault.index(e), [])]
+            filtered = [e for i, e in enumerate(self.vault)
+                        if self._entry_issues.get(i, [])]
             filtered.sort(key=lambda e: (not e.get("favourite",False),))
         n = len(self.vault)
         self.count_lbl.config(text=f"{n} entr{'y' if n==1 else 'ies'}")
@@ -3123,12 +3871,14 @@ class VaultApp(tk.Frame):
                 lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
             self.cards_frame.update_idletasks()
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            self.canvas.itemconfig(self._cw, state="normal")
             return
         cols = getattr(self, "_grid_cols", 3); cw = self.canvas.winfo_width()
+        _idx = {id(e): i for i, e in enumerate(self.vault)}  # O(1) lookup
         if cols == 1:
             self.cards_frame.grid_columnconfigure(0, weight=1)
             for i, entry in enumerate(filtered):
-                self._make_row(self.cards_frame, entry, self.vault.index(entry), i)
+                self._make_row(self.cards_frame, entry, _idx[id(entry)], i)
         else:
             cols = getattr(self, "_grid_cols", 3)
             for c in range(6):
@@ -3141,19 +3891,20 @@ class VaultApp(tk.Frame):
             nr = (len(filtered)+cols-1)//cols
             for r in range(nr): self.cards_frame.grid_rowconfigure(r, weight=0, minsize=CH)
             for i, entry in enumerate(filtered):
-                ri = self.vault.index(entry); r,c = divmod(i,cols)
+                ri = _idx[id(entry)]; r,c = divmod(i,cols)
                 cell = tk.Frame(self.cards_frame, bg=BG)
                 cell.grid(row=r, column=c, sticky="nsew", padx=8, pady=8)
                 cell.grid_rowconfigure(0, weight=1); cell.grid_columnconfigure(0, weight=1)
                 if cols >= 3: self._make_card_small(cell, entry, ri)
                 else: self._make_card(cell, entry, ri, compact=True)
-        # Rebind, layout, reveal all at once
+        # Finalise layout then reveal all at once — no incremental repaints
         self.cards_frame.bind("<Configure>",
             lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.cards_frame.update_idletasks()
         w = self.canvas.winfo_width()
         if w > 1: self.canvas.itemconfig(self._cw, width=w)
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.canvas.itemconfig(self._cw, state="normal")  # unfreeze — show all cards at once
         self.canvas.yview_moveto(0)
 
     # -- Detail panel -------------------------------------------------------
@@ -3162,9 +3913,9 @@ class VaultApp(tk.Frame):
     def _close_detail(self):
         self._detail_idx = None
         if self._detail_panel and self._detail_panel.winfo_exists():
-            self._detail_panel.grid_forget(); self._detail_panel.destroy()
+            self._detail_panel.place_forget()
+            self._detail_panel.destroy()
             self._detail_panel = None
-        for w in self._detail_container.grid_slaves(column=1): w.destroy()
 
     def _refresh_detail(self):
         if self._detail_idx is None: return
@@ -3175,9 +3926,12 @@ class VaultApp(tk.Frame):
         cat = _entry_type(entry); ctx = _entry_context(entry)
         fg_c, bg_c = _cat_colors(cat)
         ctx_fg, _ = CONTEXT_COLORS.get(ctx, (MUTED, SURFACE2))
+        DETAIL_W = 340
         panel = tk.Frame(self._detail_container, bg=SURFACE,
-                         highlightbackground=BORDER, highlightthickness=1, width=340)
-        panel.grid(row=0, column=1, sticky="nsew"); panel.grid_propagate(False)
+                         highlightbackground=BORDER, highlightthickness=1)
+        # Overlay on the right edge — no grid column, so cards column never resizes
+        panel.place(relx=1.0, x=-DETAIL_W, y=0, width=DETAIL_W, relheight=1.0)
+        panel.lift()  # ensure it renders above cards
         self._detail_panel = panel
         tk.Frame(panel, bg=fg_c, height=4).pack(fill="x")
         hdr = tk.Frame(panel, bg=SURFACE, padx=18, pady=14); hdr.pack(fill="x")
@@ -3261,19 +4015,77 @@ class VaultApp(tk.Frame):
                        bg=SURFACE2, fg=TEXT, w=18).pack(anchor="w", pady=(6,0))
             else:
                 self._detail_field(body, label, val, is_masked, opts.get("mono",False))
+        # Wi-Fi QR code
+        if cat == "Wi-Fi Password" and _QR_OK:
+            pw = entry.get("password", "")
+            ssid = entry.get("user", "") or entry.get("name", "")
+            sec_type = entry.get("security", "WPA2")
+            if pw and ssid:
+                qr_btn = mk_btn(body, "\U0001f4f1 Show QR Code", 
+                                lambda s=ssid,p=pw,st=sec_type: self._show_wifi_qr(s, p, st),
+                                bg=SURFACE2, fg=TEXT, w=16)
+                qr_btn.pack(anchor="w", pady=(8, 0))
         # Server connect
         if cat == "Server / RDP" and (entry.get("host") or entry.get("workspace","")):
-            lbl = "\u25b6  Connect via AVD" if entry.get("workspace","").strip() else "\u25b6  Connect via RDP"
-            mk_btn(body, lbl, lambda: self._rdp_connect(idx),
-                   bg="#1a5c3a", fg="#60d0a0", w=22).pack(anchor="w", pady=(8,0))
+            ws_dp = entry.get("workspace","").strip()
+            lbl = "\u25b6  Connect via AVD" if ws_dp else "\u25b6  Connect via RDP"
+            _srv_row = tk.Frame(body, bg=SURFACE)
+            _srv_row.pack(anchor="w", pady=(8,0), fill="x")
+            mk_btn(_srv_row, lbl, lambda: self._rdp_connect(idx),
+                   bg="#1a5c3a", fg="#60d0a0", w=22).pack(side="left")
+            if ws_dp:
+                _rsa = 0
+                try: _rsa = int(entry.get("rsa_delay", 0) or 0)
+                except: pass
+                _rsa_lbl = (f"\U0001f512 RSA  pw \u2192 {_rsa}s \u2192 pw" if _rsa > 0
+                            else "No MFA (set RSA/MFA WAIT in entry to enable)")
+                _rsa_col = "#e8a020" if _rsa > 0 else MUTED
+                tk.Label(_srv_row, text=_rsa_lbl, font=("Segoe UI", 8),
+                         fg=_rsa_col, bg=SURFACE).pack(side="left", padx=(10,0))
         elif entry.get("url") and cat != "Server / RDP":
-            url_val = entry["url"]; pw_val = entry.get("password","")
-            def _o(u=url_val, pw=pw_val):
+            url_val = entry["url"]
+            has_creds = bool(entry.get("user") and entry.get("password"))
+            def _open_smart(u=url_val, i=idx, hc=has_creds):
                 if not u.startswith(("http://","https://")): u = "https://"+u
-                self._copy_secure(pw); webbrowser.open(u)
-            mk_btn(body, "\U0001f310  Open URL", _o, bg=SURFACE2, fg=ACCENT, w=18).pack(anchor="w", pady=(8,0))
+                if hc:
+                    # Minimize, open browser, auto-type after 6s
+                    root = self.winfo_toplevel()
+                    root.iconify()
+                    root.after(300, lambda: webbrowser.open(u))
+                    self._auto_type_entry(i, mode="all", delay=6, minimize=False)
+                else:
+                    self._copy_secure(entry.get("password",""))
+                    webbrowser.open(u)
+            btn_lbl = "\U0001f310  Open"
+            mk_btn(body, btn_lbl, _open_smart, bg=SURFACE2, fg=ACCENT, w=22).pack(anchor="w", pady=(8,0))
         at, ac = _password_age(entry)
         tk.Label(body, text=at, font=FNT_SM, fg=ac, bg=SURFACE, anchor="w").pack(anchor="w", pady=(8,0))
+        # TOTP 2FA code
+        totp_secret = entry.get("totp_secret", "")
+        if totp_secret and _TOTP_OK:
+            tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(10,6))
+            totp_frame = tk.Frame(body, bg=SURFACE)
+            totp_frame.pack(fill="x")
+            tk.Label(totp_frame, text="2FA CODE", font=FNT_SM, fg=MUTED, bg=SURFACE).pack(anchor="w")
+            code_row = tk.Frame(totp_frame, bg=SURFACE)
+            code_row.pack(fill="x", pady=(4,0))
+            totp_code_lbl = tk.Label(code_row, text="", font=("Consolas", 24, "bold"),
+                                      fg=ACCENT, bg=SURFACE)
+            totp_code_lbl.pack(side="left")
+            totp_timer_lbl = tk.Label(code_row, text="", font=("Consolas", 11),
+                                       fg=MUTED, bg=SURFACE)
+            totp_timer_lbl.pack(side="left", padx=(12, 0))
+            totp_copy_btn = mk_btn(code_row, "Copy", lambda: None, bg=SURFACE2, fg=TEXT, w=6)
+            totp_copy_btn.pack(side="right")
+            def _update_totp(lbl=totp_code_lbl, tlbl=totp_timer_lbl, sec=totp_secret, btn=totp_copy_btn):
+                c, remaining = _generate_totp_code(sec)
+                if c:
+                    lbl.config(text=f"{c[:3]} {c[3:]}" if len(c) == 6 else c)
+                    tlbl.config(text=f"{remaining}s", fg=RED if remaining <= 5 else MUTED)
+                    btn.config(command=lambda: self._copy_secure(c))
+                if lbl.winfo_exists():
+                    lbl.after(1000, lambda: _update_totp(lbl, tlbl, sec, btn))
+            _update_totp()
         # Custom fields
         for cf in entry.get("custom_fields", []):
             cfn = cf.get("name",""); cfv = cf.get("value","")
@@ -3284,11 +4096,18 @@ class VaultApp(tk.Frame):
         ar = tk.Frame(body, bg=SURFACE); ar.pack(fill="x", pady=(4,0))
         def _tf():
             self.vault[idx]["favourite"] = not self.vault[idx].get("favourite",False)
-            self._save_vault(); self._render(); self._refresh_detail()
+            self._save_vault(); self._issues_dirty = True; self._render(); self._refresh_detail()
         mk_btn(ar, "\u2605 Unfav" if is_fav else "\u2606 Fav", _tf,
                bg=SURFACE2, fg="#f5c518" if is_fav else MUTED, w=12).pack(side="left")
         mk_btn(ar, "Edit", lambda: self._edit(idx), bg=ACCENT, fg="white", w=10
                ).pack(side="left", padx=(8,0))
+        # Auto-type split-button — all credential categories including Server/RDP
+        _has_creds = bool(entry.get("user") or entry.get("password") or entry.get("credential_ref"))
+        _type_cats = ("Password", "Email Account", "Domain Credential", "Other", "Server / RDP")
+        if cat in _type_cats and _has_creds:
+            _du, _dp = self._resolve_credential(entry)
+            _make_type_btn(ar, idx, self, SURFACE, font_size=9,
+                           has_user=bool(_du), has_pw=bool(_dp)).pack(side="left", padx=(8,0))
         mk_btn(ar, "\U0001f5d1 Del", lambda: self._delete(idx), bg=SURFACE2, fg=RED, w=10
                ).pack(side="left", padx=(8,0))
         # Move buttons
@@ -3442,10 +4261,18 @@ class VaultApp(tk.Frame):
             def _ou(u=uv,pw=pv):
                 if not u.startswith(("http://","https://")): u = "https://"+u
                 self._copy_secure(pw); webbrowser.open(u)
-            _ab("\U0001f310", _ou, col=ACCENT).pack(side="left",padx=2)
-        elif cat != "Secure Note" and entry.get("password"):
-            _ab("\U0001f4cb", lambda pw=entry["password"]: self._copy_secure(pw)).pack(side="left",padx=2)
-        _ab("Edit", lambda i=idx: self._edit(i), col=TEXT, fbg=SURFACE2).pack(side="left",padx=1)
+            def _open_smart_lr(u=uv, pw=pv, i=idx):
+                if not u.startswith(("http://","https://")): u = "https://"+u
+                if entry.get("user") and entry.get("password"):
+                    root = self.winfo_toplevel()
+                    root.iconify()
+                    root.after(300, lambda: webbrowser.open(u))
+                    self._auto_type_entry(i, mode="all", delay=6, minimize=False)
+                else:
+                    self._copy_secure(pw); webbrowser.open(u)
+            _ab("\U0001f310", _open_smart_lr, col=ACCENT).pack(side="left",padx=2)
+        if cat != "Secure Note" and (entry.get("user") or entry.get("password") or entry.get("credential_ref")):
+            _make_type_btn(acts, idx, self, rb, font_size=8).pack(side="left", padx=(2,0))
         _ab("\u2715", lambda i=idx: self._delete(i), col=RED).pack(side="left",padx=1)
         _ab("\u25b2", lambda i=idx: self._move_entry(i,-1)).pack(side="left",padx=1)
         _ab("\u25bc", lambda i=idx: self._move_entry(i,1)).pack(side="left",padx=1)
@@ -3530,9 +4357,20 @@ class VaultApp(tk.Frame):
             def _ou(u=uv,pw=pv):
                 if not u.startswith(("http://","https://")): u = "https://"+u
                 self._copy_secure(pw); webbrowser.open(u)
-            _mk("\U0001f310 Open", _ou, col=ACCENT).pack(side="left")
-        elif cat != "Secure Note" and entry.get("password"):
-            _mk("\U0001f4cb Copy", lambda pw=entry["password"]: self._copy_secure(pw)).pack(side="left")
+            _lbl_open = "\U0001f310 Open"
+            def _open_smart_sm(u=uv, pw=pv, i=idx):
+                if not u.startswith(("http://","https://")): u = "https://"+u
+                if entry.get("user") and entry.get("password"):
+                    root = self.winfo_toplevel()
+                    root.iconify()
+                    root.after(300, lambda: webbrowser.open(u))
+                    self._auto_type_entry(i, mode="all", delay=6, minimize=False)
+                else:
+                    self._copy_secure(pw); webbrowser.open(u)
+            _mk(_lbl_open, _open_smart_sm, col=ACCENT).pack(side="left")
+        # Type split-button
+        if cat != "Secure Note" and (entry.get("user") or entry.get("password") or entry.get("credential_ref")):
+            _make_type_btn(acts, idx, self, card_bg, font_size=8).pack(side="left", padx=(4,0))
         # Right: fav, edit, delete - nicer fonts
         right_acts = tk.Frame(acts, bg=card_bg); right_acts.pack(side="right")
         def _mkr(t,cmd,col=MUTED):
@@ -3544,14 +4382,9 @@ class VaultApp(tk.Frame):
         s = _mkr("\u2605" if is_fav else "\u2606", None, col="#f5c518" if is_fav else MUTED)
         def _fv(i=idx):
             self.vault[i]["favourite"] = not self.vault[i].get("favourite",False)
-            self._save_vault(); self._render()
+            self._save_vault(); self._issues_dirty = True; self._render()
         s.config(command=_fv); s.pack(side="left")
-        eb = tk.Button(right_acts, text="Edit", font=("Segoe UI",8), bg=SURFACE2, fg=TEXT,
-                       relief="flat", cursor="hand2", bd=0, padx=6, pady=2,
-                       command=lambda i=idx: self._edit(i))
-        eb.bind("<Enter>", lambda e: eb.config(bg=ACCENT,fg="white"))
-        eb.bind("<Leave>", lambda e: eb.config(bg=SURFACE2,fg=TEXT))
-        eb.pack(side="left", padx=(2,0))
+
         _mkr("\u2715", lambda i=idx: self._delete(i), col=RED).pack(side="left", padx=(2,0))
         _mkr("\u25b2", lambda i=idx: self._move_entry(i,-1)).pack(side="left", padx=(2,0))
         _mkr("\u25bc", lambda i=idx: self._move_entry(i,1)).pack(side="left", padx=(1,0))
@@ -3618,14 +4451,9 @@ class VaultApp(tk.Frame):
         fb.pack(side="left")
         def _fc(i=idx):
             self.vault[i]["favourite"] = not self.vault[i].get("favourite",False)
-            self._save_vault(); self._render()
+            self._save_vault(); self._issues_dirty = True; self._render()
         fb.config(command=_fc)
-        eb = tk.Button(acts, text="Edit", font=("Segoe UI",9), bg=ACCENT, fg="white",
-                       relief="flat", cursor="hand2", bd=0, padx=8,
-                       command=lambda i=idx: self._edit(i))
-        eb.bind("<Enter>", lambda e: eb.config(bg=_lighten(ACCENT)))
-        eb.bind("<Leave>", lambda e: eb.config(bg=ACCENT))
-        eb.pack(side="left", padx=(4,0))
+
         _mk("\u2715 Del", lambda i=idx: self._delete(i), col=RED).pack(side="left", padx=(2,0))
         _mk("\u25b2", lambda i=idx: self._move_entry(i,-1)).pack(side="left", padx=(2,0))
         _mk("\u25bc", lambda i=idx: self._move_entry(i,1)).pack(side="left", padx=(1,0))
@@ -3651,18 +4479,43 @@ class VaultApp(tk.Frame):
             h = entry.get("host",""); p = entry.get("port","3389")
             if h: self._field(inner, "Host", f"{h}:{p}" if p!="3389" else h, idx, False)
             ws = entry.get("workspace","").strip()
-            tk.Button(inner, text="\u25b6  Connect via "+(("AVD" if ws else "RDP")),
+            _mc_rdp_row = tk.Frame(inner, bg=card_bg)
+            _mc_rdp_row.pack(anchor="w", pady=(8,0))
+            tk.Button(_mc_rdp_row, text="\u25b6  Connect via "+("AVD" if ws else "RDP"),
                       font=FNT_SM, bg="#0e2a20", fg="#60d0a0", relief="flat", cursor="hand2",
                       bd=0, padx=10, pady=5, command=lambda i=idx: self._rdp_connect(i)
-                      ).pack(anchor="w", pady=(8,0))
+                      ).pack(side="left")
+            _u3, _pw3 = self._resolve_credential(self.vault[idx])
+            if _pw3:
+                _make_type_btn(_mc_rdp_row, idx, self, card_bg, font_size=9).pack(side="left", padx=(8,0))
+            if ws:
+                _rsa3 = 0
+                try: _rsa3 = int(entry.get("rsa_delay", 0) or 0)
+                except: pass
+                if _rsa3 > 0:
+                    tk.Label(_mc_rdp_row, text=f"\U0001f512 pw\u2192{_rsa3}s\u2192pw",
+                             font=("Segoe UI", 8), fg="#e8a020", bg=card_bg).pack(side="left", padx=(6,0))
         elif entry.get("url"):
             uv = entry["url"]; pv = entry.get("password","")
-            def _ou(u=uv,pw=pv):
+            has_creds_mc = bool(entry.get("user") and entry.get("password"))
+            def _open_smart_mc(u=uv, i=idx, hc=has_creds_mc):
                 if not u.startswith(("http://","https://")): u = "https://"+u
-                self._copy_secure(pw); webbrowser.open(u)
-            tk.Button(inner, text="\U0001f310  Open URL", font=FNT_SM, bg=SURFACE2, fg=ACCENT,
-                      relief="flat", cursor="hand2", bd=0, padx=10, pady=5, command=_ou
-                      ).pack(anchor="w", pady=(8,0))
+                if hc:
+                    root = self.winfo_toplevel()
+                    root.iconify()
+                    root.after(300, lambda: webbrowser.open(u))
+                    self._auto_type_entry(i, mode="all", delay=6, minimize=False)
+                else:
+                    self._copy_secure(entry.get("password",""))
+                    webbrowser.open(u)
+            _url_mc_row = tk.Frame(inner, bg=card_bg)
+            _url_mc_row.pack(anchor="w", pady=(8,0))
+            _open_mc_lbl = "\U0001f310  Open"
+            tk.Button(_url_mc_row, text=_open_mc_lbl, font=FNT_SM, bg=SURFACE2, fg=ACCENT,
+                      relief="flat", cursor="hand2", bd=0, padx=10, pady=5,
+                      command=_open_smart_mc).pack(side="left")
+            if entry.get("user") or entry.get("password"):
+                _make_type_btn(_url_mc_row, idx, self, card_bg, font_size=9).pack(side="left", padx=(8,0))
         if entry.get("notes"):
             tk.Label(inner, text=f"\U0001f4dd  {entry['notes']}", font=FNT_SM, fg=MUTED,
                      bg=card_bg, anchor="w", wraplength=320).pack(anchor="w", pady=(6,0))
@@ -3708,6 +4561,67 @@ class VaultApp(tk.Frame):
             try: w.config(bg="#0e3028")
             except: pass
         self.after(500, lambda: [w.config(bg=SURFACE2) for w in widgets if w.winfo_exists()])
+
+    def _show_wifi_qr(self, ssid, password, security="WPA2"):
+        """Show Wi-Fi QR code in a popup."""
+        sec = security.upper().replace("WPA2","WPA").replace("WPA3","SAE")
+        qr_img = _generate_wifi_qr(ssid, password, sec)
+        if not qr_img:
+            messagebox.showinfo("QR Code", "Install 'qrcode' package:\npy -m pip install qrcode",
+                                parent=self.winfo_toplevel())
+            return
+        win = tk.Toplevel(self.winfo_toplevel())
+        win.attributes("-alpha", 0)
+        win.transient(self.winfo_toplevel()); win.title(f"Wi-Fi: {ssid}")
+        win.configure(bg=SURFACE); win.resizable(False, False); win.grab_set()
+        tk.Label(win, text=f"\U0001f4f6 {ssid}", font=("Segoe UI",14,"bold"),
+                 fg=TEXT, bg=SURFACE).pack(padx=20, pady=(16,8))
+        lbl = tk.Label(win, image=qr_img, bg=SURFACE)
+        lbl.pack(padx=20, pady=8); lbl._img = qr_img
+        tk.Label(win, text="Scan with your phone to connect", font=FNT_SM,
+                 fg=MUTED, bg=SURFACE).pack(pady=(0,4))
+        mk_btn(win, "Close", win.destroy, bg=SURFACE2, fg=TEXT, w=12).pack(pady=(4,16))
+        _centre_on_parent(win, self.winfo_toplevel(), 300, 380)
+
+    def _auto_type_entry(self, idx, mode="all", delay=3, minimize=True):
+        """Auto-type credentials.
+        Always copies to clipboard (clears in 30s) so Ctrl+V works if typing misses."""
+        entry = self.vault[idx]
+        user = entry.get("user", "")
+        pw   = entry.get("password", "")
+        root = self.winfo_toplevel()
+
+        # Determine what goes to clipboard (password is the most useful fallback)
+        clip_val = pw if mode in ("all", "password") else user
+
+        mode_label = {"all": "username + password", "password": "password", "username": "username"}
+        Toast.show(root,
+                   f"\u2328 Typing {mode_label.get(mode, 'credentials')} in {delay}s \u2014 switch to target",
+                   ACCENT, delay * 1000 + 500)
+
+        def _do():
+            _time.sleep(0.6)
+            if minimize:
+                root.after(0, root.iconify)
+                _time.sleep(0.4)
+            _time.sleep(delay - 1)
+
+            # Copy to clipboard BEFORE typing — available immediately if typing misses
+            if clip_val:
+                root.after(0, lambda: _clipboard_copy_secure(clip_val, root, clear_after=30))
+
+            success = _auto_type(user, pw, mode=mode)
+
+            def _done():
+                if minimize: root.deiconify()
+                if success:
+                    Toast.show(root, "\u2714 Typed \u2014 Ctrl+V also works if needed", GREEN, 2500)
+                else:
+                    Toast.show(root,
+                        "\u2716 Typing failed \u2014 password in clipboard, use Ctrl+V",
+                        "#e8a020", 4000)
+            root.after(200, _done)
+        threading.Thread(target=_do, daemon=True).start()
 
     def _copy_secure(self, value, clear_after=30):
         """Copy to clipboard securely with toast notification."""
@@ -3952,7 +4866,7 @@ class VaultApp(tk.Frame):
         VaultApp._show_about_static(self.winfo_toplevel())
 
     def _add_entry(self):
-        def on_save(r): self.vault.insert(0,r); self._save_vault(); self._render()
+        def on_save(r): self.vault.insert(0,r); self._save_vault(); self._issues_dirty = True; self._render()
         EntryDialog(self.winfo_toplevel(), on_save, vault=self.vault)
 
     def _resolve_credential(self, entry):
@@ -3974,9 +4888,56 @@ class VaultApp(tk.Frame):
         # For AVD: copy password securely THEN launch after a brief delay
         # For standard RDP: password goes via CredWriteW, no clipboard needed
         if ws:
-            # AVD needs longer clipboard time — user may need to paste password twice
-            self._copy_secure(pw, clear_after=90)
-            self.after(150, lambda: self._do_rdp_launch(h, p, u, pw, ws))
+            # AVD auth sequence (background thread — no toast on minimized window):
+            #   8s  → AVD lock screen loads → type password
+            #   rsa_delay s → user approves RSA push on phone → type password again
+            #   rsa_delay=0 → no MFA, done after first password
+            rsa_delay = 0
+            try: rsa_delay = max(0, int(e.get("rsa_delay", 0) or 0))
+            except (ValueError, TypeError): pass
+            self._copy_secure(pw, clear_after=max(120, 20 + rsa_delay))
+            root = self.winfo_toplevel()
+            root.iconify()  # minimize so AVD window gets keyboard focus
+            self.after(200, lambda: self._do_rdp_launch(h, p, u, pw, ws))
+            avd_mode = e.get("avd_mode", "Browser")
+            def _avd_auth(password=pw, rsa=rsa_delay, r=root, mode=avd_mode):
+                # Step 1: wait for AVD lock screen, type first password
+                _time.sleep(9)
+                r.after(0, lambda: _clipboard_copy_secure(password, r, clear_after=30))
+                _auto_type(username="", password=password, mode="password")
+
+                if rsa > 0:
+                    # Step 2a: try desktop RSA app (waits up to 8s)
+                    r.after(0, lambda: Toast.show(r,
+                        "🔍 Looking for RSA app on this PC…",
+                        "#e8a020", 3000))
+                    approved_desktop = _rsa_approve_desktop(wait_for_popup=8)
+
+                    if approved_desktop:
+                        r.after(0, lambda: Toast.show(r,
+                            "✔ RSA approved — typing password…", GREEN, 3000))
+                        _time.sleep(1.5)
+                        if mode == "Windows App":
+                            _focus_avd_prompt(["windows security", "credential dialog",
+                                               "windows app", "remote desktop"])
+                        r.after(0, lambda: _clipboard_copy_secure(password, r, clear_after=30))
+                        _auto_type(username="", password=password, mode="password")
+                    else:
+                        # RSA on phone — show trigger (banner + Ctrl+F12 hotkey)
+                        typed = threading.Event()
+                        _rsa_wait_for_trigger(r, typed.set)
+                        typed.wait(timeout=180)
+                        if typed.is_set():
+                            if mode == "Windows App":
+                                _focus_avd_prompt(["windows security", "credential dialog",
+                                                   "windows app", "remote desktop"])
+                            else:
+                                _time.sleep(0.3)
+                            r.after(0, lambda: _clipboard_copy_secure(password, r, clear_after=30))
+                            _auto_type(username="", password=password, mode="password")
+
+                r.after(800, r.deiconify)
+            threading.Thread(target=_avd_auth, daemon=True).start()
         else:
             ok, err = _launch_rdp(h, p, u, pw, ws)
             if not ok: messagebox.showerror("Error", str(err), parent=self.winfo_toplevel())
@@ -3987,7 +4948,7 @@ class VaultApp(tk.Frame):
 
     def _edit(self, idx):
         def on_save(r):
-            self.vault[idx] = r; self._save_vault(); self._render()
+            self.vault[idx] = r; self._save_vault(); self._issues_dirty = True; self._render()
             if self._detail_idx == idx: self._refresh_detail()
         EntryDialog(self.winfo_toplevel(), on_save, entry=self.vault[idx], vault=self.vault)
 
@@ -3995,7 +4956,7 @@ class VaultApp(tk.Frame):
         if messagebox.askyesno("Delete",f"Delete '{self.vault[idx]['name']}'?",parent=self.winfo_toplevel()):
             if self._detail_idx == idx: self._close_detail()
             elif self._detail_idx is not None and self._detail_idx > idx: self._detail_idx -= 1
-            del self.vault[idx]; self._save_vault(); self._render()
+            del self.vault[idx]; self._save_vault(); self._issues_dirty = True; self._render()
 
     def _move_entry(self, idx, direction):
         """Move entry up (-1) or down (+1) in the vault list."""
@@ -4007,7 +4968,7 @@ class VaultApp(tk.Frame):
             self._detail_idx = new_idx
         elif self._detail_idx == new_idx:
             self._detail_idx = idx
-        self._save_vault(); self._render()
+        self._save_vault(); self._issues_dirty = True; self._render()
         if self._detail_idx is not None:
             self._refresh_detail()
 
